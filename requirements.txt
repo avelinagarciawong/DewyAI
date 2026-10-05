@@ -1,0 +1,30 @@
+# LLM & RAG 
+groq>=0.9.0
+chromadb
+sentence-transformers==3.0.1
+
+# Web Framework
+fastapi
+uvicorn
+streamlit==1.51.0
+pyjwt
+bcrypt
+email-validator
+
+# Data & ML
+pandas
+numpy
+scikit-learn
+openpyxl
+
+#Scraping 
+requests==2.32.3
+selenium==4.21.0
+undetected-chromedriver
+
+# NLP Bahasa Indonesia
+PySastrawi>=1.0.0
+
+# Utils 
+python-dotenv==1.0.1
+tqdm==4.66.4

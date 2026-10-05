@@ -1,0 +1,33 @@
+# Backend Dew AI (FastAPI + CBF + RAG + LLM). Dipasang oleh deploy/setup_server.sh.
+# Hanya mendengarkan di 127.0.0.1 -- satu-satunya pemanggilnya frontend di mesin yang sama.
+[Unit]
+Description=Dew AI backend (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=dewai
+Group=dewai
+WorkingDirectory=/opt/dewai/app
+# GROQ_API_KEY, JWT_SECRET, ADMIN_EMAIL/ADMIN_PASSWORD/ADMIN_NAMA
+EnvironmentFile=/etc/dewai/dewai.env
+Environment=DATABASE_PATH=/var/lib/dewai/chatbot.db
+Environment=HF_HOME=/var/lib/dewai/hf
+Environment=WAJIB_HTTPS=1
+Environment=ANONYMIZED_TELEMETRY=False
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# X-Forwarded-For (IP asli pengunjung, dikirim frontend) hanya dipercaya dari 127.0.0.1
+ExecStart=/opt/dewai/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=5
+
+# pengamanan: kode read-only, yang boleh ditulis hanya database/cache & index RAG
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dewai /opt/dewai/app/data/chroma_db
+
+[Install]
+WantedBy=multi-user.target

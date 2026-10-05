@@ -1,0 +1,27 @@
+# Frontend Dew AI (Streamlit). Dipasang oleh deploy/setup_server.sh.
+# Hanya mendengarkan di 127.0.0.1; pengunjung masuk lewat Caddy (HTTPS).
+# WorkingDirectory = root repo supaya .streamlit/config.toml (tema) terbaca.
+[Unit]
+Description=Dew AI frontend (Streamlit)
+After=network-online.target dewai-backend.service
+Wants=network-online.target dewai-backend.service
+
+[Service]
+User=dewai
+Group=dewai
+WorkingDirectory=/opt/dewai/app
+Environment=BACKEND_URL=http://127.0.0.1:8000
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/dewai/venv/bin/streamlit run frontend/app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true --server.fileWatcherType none --browser.gatherUsageStats false
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dewai
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+.env
+__pycache__/
+*.pyc
+
+# Database lokal backend (akun/riwayat user) -- bukan kode, jangan ke-commit
+backend/chatbot.db
+
+# Dibuat otomatis oleh scraper (cache/cookies browser, ratusan MB)
+chrome_profile*/
+chrome-for-testing/
+
+# Virtual environment & log
+.venv/
+venv/
+*.log
+
+# paket upload ke server (deploy/buat_paket.py)
+dewai_paket.tar.gz
+
+# data hasil scraping & index ChromaDB (ratusan MB, tidak di-upload) -- kecuali katalog
+# produk final (chatbot langsung jalan), bahan index RAG (ulasan Shopee + post X versi anonim,
+# dibangun dengan models/bangun_rag_index.py), dan set uji NLU
+data/*
+!data/products_final.csv
+!data/clean_merged_produk_ulasan_labelled_v2.csv
+!data/x_untuk_rag.csv
+!data/uji_nlu.csv
+
+# akun scraper Shopee/X (berisi password) -- JANGAN di-upload
+accounts.db
+
+# kunci SSH server & pengaturan/catatan lokal editor
+*.pem
+.claude/
+CLAUDE.md

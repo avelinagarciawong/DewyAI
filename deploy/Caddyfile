@@ -1,0 +1,15 @@
+# Caddy: HTTPS otomatis (Let's Encrypt) untuk domain VM, diteruskan ke Streamlit.
+# __DOMAIN__ diganti setup_server.sh, mis. dewai-skincare.southeastasia.cloudapp.azure.com.
+# HTTP (port 80) otomatis dialihkan ke HTTPS. Caddy mengabaikan X-Forwarded-For
+# kiriman klien dan mengisinya dengan IP koneksi yang asli -- itu yang dibaca
+# frontend (ip_pengunjung) untuk rate limit backend.
+__DOMAIN__ {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8501
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

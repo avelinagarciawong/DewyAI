@@ -1,0 +1,13 @@
+#!/bin/sh
+# Backup harian database Dew AI (dipasang ke /etc/cron.daily/ oleh setup_server.sh).
+# Pakai ".backup" SQLite -- aman walau backend sedang menulis. Disimpan 14 hari di
+# /var/backups/dewai (grup adm, jadi bisa diunduh admin VM lewat scp; lihat DEPLOY.md).
+set -e
+DB=/var/lib/dewai/chatbot.db
+TUJUAN=/var/backups/dewai
+[ -f "$DB" ] || exit 0
+BERKAS="$TUJUAN/chatbot-$(date +%F).db"
+sqlite3 "$DB" ".backup '$BERKAS'"
+chgrp adm "$BERKAS"
+chmod 640 "$BERKAS"
+find "$TUJUAN" -name 'chatbot-*.db' -mtime +14 -delete
