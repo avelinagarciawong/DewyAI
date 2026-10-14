@@ -15,6 +15,7 @@ email-validator
 pandas
 numpy
 scikit-learn
+scipy
 openpyxl
 
 #Scraping 

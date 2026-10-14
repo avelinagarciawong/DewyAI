@@ -75,7 +75,9 @@ PORSI_DEV = 0.3
 MODEL_EMBEDDING = "paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_NLI = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
 GRID_EMBEDDING = np.round(np.arange(0.20, 0.91, 0.01), 2)
-GRID_NLI = np.round(np.arange(0.01, 1.00, 0.01), 2)
+# peluang entailment NLI sering menumpuk di atas 0,99 -> ujung atas grid dibuat lebih rapat supaya ambang terbaik
+# tidak terpotong di 0,99 (yang membuat NLI tampak lebih buruk dari kemampuannya)
+GRID_NLI = np.concatenate([np.round(np.arange(0.01, 0.99, 0.01), 2), [0.99, 0.995, 0.998, 0.999, 0.9995, 0.9999]])
 JEDA_ANTAR_LLM = 8      # detik; kuota gratis Groq ~8.000 token/menit
 JEDA_SETELAH_GAGAL = 65  # detik; rate limit/jaringan -> tunggu lalu ulangi
 MAKS_ULANG_LLM = 5
@@ -376,7 +378,7 @@ def main():
                     baris_label.append({"seed": seed, "pendekatan": nama, "field": field, "label": lb,
                                         "support": x["support"], "precision": p, "recall": r, "f1": f})
         print(f"\nSeed {seed}: dev {len(idx_dev)}, test {len(idx_test)} kalimat; ambang embedding "
-              f"tipe/masalah = {amb_c[0]:.2f}/{amb_c[1]:.2f}, ambang NLI = {amb_d[0]:.2f}/{amb_d[1]:.2f}")
+              f"tipe/masalah = {amb_c[0]:.2f}/{amb_c[1]:.2f}, ambang NLI = {amb_d[0]:g}/{amb_d[1]:g}")
 
     ringkas = pd.DataFrame(baris_ringkas)
     per_label = pd.DataFrame(baris_label)

@@ -6,7 +6,7 @@ st.set_page_config(page_title="Dew AI", page_icon=ICON, layout="wide")
 import sidebar
 from core import BACKEND_URL, backend_aman, state_awal
 from styles import inject_base
-from halaman import(admin_dashboard,admin_produk,admin_users,chat,login,onboarding,profile,register)
+from halaman import(admin_dashboard,admin_produk,admin_survei,admin_users,chat,login,onboarding,profile,register,survei)
 
 HALAMAN = {
     "chat": (chat.render, None),
@@ -14,6 +14,8 @@ HALAMAN = {
     "admin_dashboard": (admin_dashboard.render, "admin"),
     "admin_users": (admin_users.render, "admin"),
     "admin_produk": (admin_produk.render, "admin"),
+    "admin_survei": (admin_survei.render, "admin"),
+    "survei": (survei.render, None),
 }
 
 def main():
@@ -24,6 +26,11 @@ def main():
         st.error(f"Koneksi ke backend ({BACKEND_URL}) harus lewat HTTPS supaya email, password, dan sesi login "
                  "tidak terkirim tanpa enkripsi. Ganti BACKEND_URL ke alamat https://.")
         st.stop()
+
+    # link survei untuk responden (?survei=1) -- parameter dibiarkan di alamat supaya mode survei
+    # tetap aktif kalau halaman dimuat ulang
+    if st.query_params.get("survei") == "1":
+        ss.survei_aktif = True
 
     # link teks di kartu auth (?ke=login / ?ke=register)
     ke = st.query_params.get("ke")

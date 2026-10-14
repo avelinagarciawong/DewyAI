@@ -88,6 +88,8 @@ def teks_tunggu(detik):
     return f"{menit} menit" if detik >= 60 else f"{detik} detik"
 
 
-# register: percobaan per IP; login: percobaan GAGAL per (IP, email)
+# register: percobaan per IP; login: percobaan GAGAL per (IP, email); survei: kiriman per IP
 BATAS_REGISTER = PembatasLaju(*_baca_env("RATE_LIMIT_REGISTER", "10/600"))
 BATAS_LOGIN_GAGAL = PembatasLaju(*_baca_env("RATE_LIMIT_LOGIN_GAGAL", "5/900"))
+# survei: longgar karena responden bisa satu jaringan (mis. WiFi kampus, IP publik sama)
+BATAS_SURVEI = PembatasLaju(*_baca_env("RATE_LIMIT_SURVEI", "30/3600"))

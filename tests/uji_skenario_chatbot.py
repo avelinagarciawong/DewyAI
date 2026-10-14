@@ -493,6 +493,9 @@ def uji_bagian_2():
              and "Alasannya:" in d["explanation"] and "Cara hitung skor" in d["explanation"]
              and d["konteks"]["pool"] == awal["konteks"]["pool"]
              for p, d in hasil.items()}
+    # temuan uji coba survei: "nomor 1 dan 2" dulu terbaca [1] saja -> "Cuma ada 1 produk di daftar tadi"
+    _, dua_nomor = chat("nomor 1 dan 2 bagusan mana?", konteks=awal["konteks"])
+    dua_nomor_benar = len(dua_nomor["perbandingan"]["produk"]) == 2 and _ids(dua_nomor)[0] in daftar[:2]
     _, sepuluh = chat("kasih 10")
     tipis = None
     for i, j in combinations(range(len(_ids(sepuluh))), 2):
@@ -502,10 +505,13 @@ def uji_bagian_2():
             break
     contoh = hasil[frasa[0]]
     cek("2.9", "'yang bagusan mana' dkk -> sempit ke 1 pemenang dari hasil yang SAMA, dipilih dari rincian skor "
-               "(bukan otomatis nomor 1); skor tipis -> dijelaskan trade-off-nya",
-        all(benar.values()) and tipis is not None and "unggul karena" in tipis[3],
+               "(bukan otomatis nomor 1); skor tipis -> dijelaskan trade-off-nya; 'nomor 1 dan 2' -> dipilih dari "
+               "2 produk itu saja",
+        all(benar.values()) and dua_nomor_benar and tipis is not None and "unggul karena" in tipis[3],
         f"daftar={daftar}; skor akhir={skor_akhir(contoh)} -> pemenang {_ids(contoh)} "
         f"(nomor {daftar.index(_ids(contoh)[0]) + 1}); tiap frasa benar={benar}; "
+        f"'nomor 1 dan 2 bagusan mana?' -> tabel {len(dua_nomor['perbandingan']['produk'])} produk, "
+        f"pemenang {_ids(dua_nomor)}; "
         + (f"trade-off nomor {tipis[0]} vs {tipis[1]} skor {tipis[2]}: "
            f"{[s for s in tipis[3].split(chr(10)) if 'tipis' in s]}" if tipis else "trade-off: tidak ketemu pasangan tipis"))
 
@@ -654,12 +660,33 @@ def uji_bagian_4():
         f"kolom={d3['perbandingan']['produk']}")
 
     _, d4 = chat("bandingkan glowy magic serum xyz dengan cetaphil gentle skin cleanser")
-    _, d4b = chat("bandingkan wardah sama azarine")
+    _, d4b = chat("bandingkan moisturizer gel sama sunscreen gel")
+    # temuan uji coba: "bandingkan produk wardah dengan azzarine, bagusan yang mana ya?" dulu jadi "produk 'bagusan'
+    # nggak ketemu" + "wardah yang mana?" -> sekarang perbandingan brand dari data
+    _, d4c = chat("bandingkan produk wardah dengan azzarine, bagusan yang mana ya?")
+    _, d4d = chat("bandingkan wardah sama vivalavida")
+    # pertanyaan pilihan tanpa kata "bandingkan"/"bagusan" ("aku cocoknya pakai cosrx atau wardah?") = perbandingan merek
+    pilihan = {p: chat(p)[1] for p in ("aku cocoknya pakai cosrx atau wardah?", "enaknya beli wardah apa emina")}
+    pilihan_benar = {p: d["tipe"] == "perbandingan" and len((d.get("perbandingan") or {}).get("produk", [])) == 2
+                     for p, d in pilihan.items()}
+    tabel_merek = d4c.get("perbandingan") or {}
+    atribut_merek = [b["atribut"] for b in tabel_merek.get("baris", [])]
     cek("4.4", "Nama produk tidak ada di database -> bilang terus terang, tanpa tabel/data karangan "
-               "(nama terlalu umum -> tanya balik)",
+               "(nama terlalu umum -> tanya balik); yang dibandingkan merek -> tabel perbandingan merek dari data "
+               "(produk yang cocok, ulasan, harga) + kesimpulan; merek yang tidak ada di data -> terus terang",
         not d4.get("perbandingan") and "\"glowy magic serum xyz\" nggak ketemu" in d4["explanation"]
-        and not d4b.get("perbandingan") and "Maksud kamu yang mana?" in d4b["explanation"],
-        f"{d4['explanation']!r}; 'wardah sama azarine' -> {d4b['explanation'][:160]!r}")
+        and not d4b.get("perbandingan") and "Maksud kamu yang mana?" in d4b["explanation"]
+        and d4c["tipe"] == "perbandingan" and tabel_merek.get("produk") == ["Wardah", "Azarine"]
+        and {"Cocok untuk kulitmu", "Ulasan positif", "Harga tengah produk yang cocok"} <= set(atribut_merek)
+        and 'tertulis "azzarine"' in d4c["explanation"] and "bagusan" not in d4c["explanation"]
+        and {str(x["brand"]).lower() for x in d4c["recommendation"]} <= {"wardah", "azarine"}
+        and d4d["tipe"] == "klarifikasi" and 'Merek "vivalavida" belum ada di data' in d4d["explanation"]
+        and not d4d.get("perbandingan") and all(pilihan_benar.values()),
+        f"{d4['explanation']!r}; 'moisturizer gel sama sunscreen gel' -> {d4b['explanation'][:80]!r}; 'wardah dengan "
+        f"azzarine' -> kolom {tabel_merek.get('produk')}, baris {atribut_merek}, "
+        f"{[p for p in d4c['explanation'].split(chr(10) * 2) if 'unggul' in p or 'prioritas' in p][:1]}; "
+        f"'wardah sama vivalavida' -> {d4d['explanation'][:70]!r}; pertanyaan pilihan: "
+        + "; ".join(f"{p!r} -> {(d.get('perbandingan') or {}).get('produk')}" for p, d in pilihan.items()))
 
     _, d5 = chat("bandingkan azarine hydrasoothe dengan wardah lightening face mist")
     nama5 = [katalog.at[i, "nama_produk"] for i in kolom(d5)]
@@ -830,15 +857,24 @@ def uji_bagian_6():
         dilihat |= set(_ids(d))
         putaran += 1
     _, ulang = chat("yang lain lagi dong", ob_sempit, d["konteks"])
+    # temuan uji coba: "itu aja?" setelah rekomendasi dulu dijawab "belum nangkap maksudnya"; penutup "oke itu aja deh"
+    _, itu_aja = chat("itu aja?", ob, awal["konteks"])
+    _, penutup = chat("oke itu aja deh, makasih", ob, awal["konteks"])
+    a3 = set(_ids(itu_aja))
     cek("6.2", "Minta alternatif -> produk yang sudah ditampilkan dikeluarkan (jumlah sama, filter tetap); "
-               "kalau sudah habis, bilang terus terang",
-        len(a1) == len(a0) == len(a2) and not (a0 & a1) and not (a2 & (a0 | a1))
+               "kalau sudah habis, bilang terus terang; 'itu aja?' setelah daftar tampil = minta pilihan lain, "
+               "'oke itu aja deh, makasih' = penutup",
+        len(a3) == len(a0) and not (a0 & a3) and "belum nangkap" not in itu_aja["explanation"]
+        and not penutup["recommendation"] and "belum nangkap" not in penutup["explanation"]
+        and penutup["konteks"]["tampil"] == awal["konteks"]["tampil"]
+        and len(a1) == len(a0) == len(a2) and not (a0 & a1) and not (a2 & (a0 | a1))
         and set(_kategori(lain1)) == set(_kategori(lain2)) == {"sunscreen"}
         and not dobel and d["tipe"] == "kosong" and "sudah aku tampilkan" in d["explanation"]
         and ulang["tipe"] == "kosong" and not ulang["recommendation"],
         f"daftar 1={len(a0)}, 'yang lain'={len(a1)} (irisan {len(a0 & a1)}), 'yang lain lagi'={len(a2)} "
         f"(irisan {len(a2 & (a0 | a1))}); profil sempit: {len(dilihat)} produk unik dalam {putaran} putaran tanpa "
-        f"dobel, lalu -> {d['explanation'][:110]!r}")
+        f"dobel, lalu -> {d['explanation'][:110]!r}; 'itu aja?' -> {len(a3)} produk baru (irisan {len(a0 & a3)}), "
+        f"'oke itu aja deh, makasih' -> {penutup['explanation'][:50]!r}")
 
     # 6.3 lebih murah -> budget_max diketatkan (sticky + diumumkan)
     termurah = min(h for h in _harga(awal) if h is not None)
@@ -879,16 +915,20 @@ def uji_bagian_6():
         if x["tipe"] == "ulasan" and nama[:30] in x["explanation"]:
             nol = (nama, x)
             break
-    _, ambigu = chat("review skintific dong", ob)
+    _, ambigu = chat("review moisturizer gel dong", ob)
+    # nama brand saja -> rangkuman ulasan brand itu (6.15), bukan lagi ditanya "yang mana"
+    _, merek_saja = chat("review skintific dong", ob)
     cek("6.4", "Tanya ulasan -> kutipan ulasan asli dari RAG untuk produk itu (bukan dari CBF), keluhan -> ulasan "
-               "negatif; produk tanpa ulasan & nama ambigu dijawab jujur",
+               "negatif; produk tanpa ulasan & nama ambigu dijawab jujur; nama merek saja -> rangkuman merek",
         rev["tipe"] == "ulasan" and len(bagus) >= 2 and asli1 and "ulasan positif dari" in rev["explanation"]
         and kel["tipe"] == "ulasan" and asli2 and keluhan_ok
         and nol is not None and "Belum ada ulasan" in nol[1]["explanation"] and not _kutipan(nol[1]["explanation"])
-        and ambigu["tipe"] == "klarifikasi" and "Maksud kamu yang mana" in ambigu["explanation"],
+        and ambigu["tipe"] == "klarifikasi" and "Maksud kamu yang mana" in ambigu["explanation"]
+        and merek_saja["tipe"] == "ulasan" and "produk Skintific di data aku" in merek_saja["explanation"],
         f"nomor 1: {len(k1)} kutipan, semua ada di ulasan asli={asli1}, contoh={k1[0][1][:90] if k1 else None!r}; "
         f"keluhan nomor 2: {len(k2)} kutipan, asli={asli2}, bintang keluhan <=3/\"nggak ada\"={keluhan_ok}; "
-        f"produk tanpa ulasan ({(nol or ('-',))[0][:35]!r}) -> 'Belum ada ulasan'; 'skintific' -> tanya yang mana")
+        f"produk tanpa ulasan ({(nol or ('-',))[0][:35]!r}) -> 'Belum ada ulasan'; 'moisturizer gel' -> tanya yang "
+        f"mana; 'review skintific' -> {merek_saja['explanation'][:80]!r}")
 
     # 6.5 urutkan -> re-sort daftar yang SAMA
     _, lima = chat("kasih 10 sunscreen", ob)  # 10 agar rating & harganya bervariasi
@@ -939,6 +979,318 @@ def uji_bagian_6():
         f"login ulang -> profil={user['tipe_kulit']}, {user['masalah_kulit']}, budget {user['budget']}; tamu -> form "
         f"tampil={form_tamu}; chat baru: budget kembali ke form ({k['profil']['budget_max']}, sebelumnya diketatkan "
         f"jadi {b}), riwayat produk cuma {len(k['sudah_tampil'])} produk dari sesi ini")
+
+    # 6.7 (feedback pengguna) menanyakan kecocokan dengan satu brand -> dijawab cocok/tidak dari data seluruh
+    # produk brand itu, bukan rekomendasi umum; tipe kulit yang disebut dinilai tanpa mengubah profil
+    _, merek = chat("apakah aku cocok dengan produk wardah?", ob)
+    _, merek_sensitif = chat("wardah cocok ga buat kulit sensitif?", ob)
+    # temuan uji coba: "cocok ga wardah buat aku" dulu ditanya balik "produk wardah yang mana?"
+    _, merek_ga = chat("cocok ga wardah buat aku", ob)
+    kartu = merek["recommendation"] + merek_sensitif["recommendation"] + merek_ga["recommendation"]
+    jawab_langsung = all("**Ada yang cocok.**" in d["explanation"] or "**Belum ada yang cocok.**" in d["explanation"]
+                         for d in (merek, merek_sensitif, merek_ga))
+    cek("6.7", "Tanya kecocokan dengan satu brand ('apakah aku cocok dengan produk wardah?') -> jawaban langsung "
+               "cocok/belum cocok dari seluruh produk brand itu + alasan yang tidak cocok; kartu hanya produk brand "
+               "itu; tipe kulit yang disebut dinilai tanpa mengubah profil",
+        jawab_langsung and "produk Wardah" in merek["explanation"] and kartu
+        and all(str(x["brand"]).lower() == "wardah" for x in kartu)
+        and "kulit sensitif" in merek_sensitif["explanation"]
+        and merek_sensitif["konteks"]["profil"]["tipe_kulit"] == "berminyak",
+        f"brand -> {merek['explanation'][:150]!r}; kartu: {[x['brand'] for x in kartu]}; 'cocok ga buat kulit "
+        f"sensitif?' -> profil tetap {merek_sensitif['konteks']['profil']['tipe_kulit']}")
+
+    # 6.8 kecocokan produk tertentu -> kesimpulan dulu baru rincian; pertanyaan umum soal bahan -> dijawab
+    # terus terang (bukan dicari sebagai nama produk); permintaan "yang cocok buat kulitku" tetap rekomendasi
+    _, daftar = chat("rekomendasiin toner dong", ob)
+    _, nomor = chat("nomor 1 cocok ga buat kulitku?", ob, daftar["konteks"])
+    _, bernama = chat("skintific 5x ceramide moisturizer cocok buat kulitku ga?", ob)
+    _, bahan = chat("aman ga pakai produk yang ada alkoholnya?", ob)
+    _, minta = chat("rekomendasiin sunscreen yang cocok buat kulitku dong", ob)
+    vonis = ("**Cocok", "**Kurang cocok", "**Belum bisa dipastikan")
+    cek("6.8", "Tanya 'cocok ga buat kulitku?' untuk produk tertentu (nomor/nama) -> kesimpulan cocok/kurang cocok "
+               "dulu, lalu rincian; pertanyaan umum soal bahan -> dijawab jujur tanpa salah tangkap nama produk; "
+               "'rekomendasiin ... yang cocok buat kulitku' tetap memberi rekomendasi",
+        all(d["tipe"] == "info_produk" and d["explanation"].startswith(vonis) and "Rinciannya" in d["explanation"]
+            and not d["recommendation"] for d in (nomor, bernama))
+        and bahan["tipe"] == "info_bahan" and "Alkohol" in bahan["explanation"] and not bahan["recommendation"]
+        and "nggak ada di data aku" not in bahan["explanation"]
+        and minta["tipe"] == "rekomendasi" and minta["recommendation"],
+        f"nomor 1 -> {nomor['explanation'][:90]!r}; nama -> {bernama['explanation'][:90]!r}; bahan -> "
+        f"{bahan['explanation'][:70]!r}; 'yang cocok buat kulitku' -> {minta['tipe']}, {len(minta['recommendation'])} produk")
+
+    # 6.9 (feedback pengguna) fungsi bahan -> dijawab dari glosarium terkurasi (bukan LLM), lalu produk katalog
+    # yang memang mengandung bahan itu; dua bahan dijelaskan berdampingan; brand + bahan tetap pertanyaan produk
+    import re
+    pola_niacinamide = re.compile(r"niacinamide|nicotinamide|vit(amin)? b3")
+    teks_produk = {r["id"]: " ".join(str(r[c]) for c in ("nama_produk", "kandungan", "deskripsi")
+                                     if pd.notna(r[c])).lower() for _, r in katalog.iterrows()}
+    _, fungsi = chat("niacinamide itu buat apa?", ob)
+    _, dua = chat("bedanya aha sama bha apa?", ob)
+    _, produk_bahan = chat("somethinc niacinamide bagus ga?", ob)
+    # temuan uji coba: salah ketik nama bahan & "kandungan apa yang cocok" dulu dicari sebagai nama produk
+    _, salah_ketik = chat("niacenimide itu apa", ob)
+    _, saran = chat("aku cocoknya pakai kandungan produk apa?", ob)
+    salah_ketik_benar = salah_ketik["tipe"] == "info_bahan" and "**Niacinamide" in salah_ketik["explanation"] \
+        and 'tertulis "niacenimide"' in salah_ketik["explanation"]
+    saran_benar = saran["tipe"] == "info_bahan" and "Salicylic acid" in saran["explanation"] \
+        and "nggak ada di data aku" not in saran["explanation"] and not saran["recommendation"] \
+        and saran["konteks"]["profil"]["masalah_kulit"] == ["jerawat"]
+    cek("6.9", "Tanya fungsi bahan ('niacinamide itu buat apa?') -> fungsi & hal yang perlu diperhatikan dari "
+               "glosarium + produk katalog yang mengandung bahan itu; 'bedanya aha sama bha' -> dua bahan tanpa kartu; "
+               "brand + bahan tetap dijawab sebagai produk; profil tidak berubah; nama bahan salah ketik tetap "
+               "dikenali (disebut terus terang); 'kandungan apa yang cocok buat aku' -> bahan untuk masalah kulitnya",
+        fungsi["tipe"] == "info_bahan" and "**Niacinamide" in fungsi["explanation"]
+        and "Fungsi:" in fungsi["explanation"] and "bukan pengganti saran dokter" in fungsi["explanation"]
+        and fungsi["recommendation"]
+        and all(pola_niacinamide.search(teks_produk.get(x["id"], "")) for x in fungsi["recommendation"])
+        and fungsi["konteks"]["profil"]["tipe_kulit"] == "berminyak"
+        and dua["tipe"] == "info_bahan" and "**AHA" in dua["explanation"] and "**Salicylic acid" in dua["explanation"]
+        and not dua["recommendation"] and produk_bahan["tipe"] != "info_bahan" and salah_ketik_benar and saran_benar,
+        f"fungsi -> {fungsi['explanation'][:80]!r}, kartu: {[x['produk'][:30] for x in fungsi['recommendation']]}; "
+        f"dua bahan -> {len(dua['recommendation'])} kartu; 'somethinc niacinamide bagus ga?' -> {produk_bahan['tipe']}; "
+        f"'niacenimide itu apa' -> {salah_ketik['explanation'][:70]!r}; 'aku cocoknya pakai kandungan produk apa?' -> "
+        f"{[b for b in saran['explanation'].split(chr(10)) if b.startswith('- ')]}")
+
+    # 6.10 (feedback pengguna) rutinitas & rencana 1 bulan -> satu produk katalog per langkah dengan urutan pagi/malam,
+    # total harga yang dihitung dari kartu, jadwal 4 minggu hanya kalau diminta; profil di pesan yang sama diterapkan
+    _, rutin = chat("buatkan rutinitas skincare pagi malam", ob)
+    _, plan = chat("plan skincare 1 bulan buat kulit kering budget 100rb", ob)
+    _, nomor_rutin = chat("harga nomor 1 berapa?", ob, rutin["konteks"])
+    urutan_benar = ["facial_wash", "toner", "serum", "moisturizer", "sunscreen"]
+
+    def langkah(d):
+        return [g["produk"][0]["kategori"] for g in d.get("grup") or [] if len(g["produk"]) == 1]
+
+    def total_benar(d):
+        m = re.search(r"Perkiraan total:\*\* Rp([\d.]+)", d["explanation"])
+        harga = [x["harga"] for x in d["recommendation"] if x["harga"] is not None]
+        return bool(m) and int(m.group(1).replace(".", "")) == round(sum(harga))
+    budget_plan = all(x["harga"] is None or x["harga"] <= 100000 or x["di_luar_budget"] for x in plan["recommendation"])
+    cek("6.10", "Minta rutinitas -> satu produk per langkah (facial wash, toner opsional, serum, moisturizer, "
+                "sunscreen) berurutan + urutan pagi/malam + total harga yang benar; 'plan 1 bulan' menambah jadwal "
+                "Minggu 1-4 dan menerapkan tipe kulit & budget di pesannya; nomor kartu bisa dirujuk",
+        rutin["tipe"] == "rutinitas" and langkah(rutin) == [x for x in urutan_benar if x in langkah(rutin)]
+        and {"facial_wash", "serum", "moisturizer", "sunscreen"} <= set(langkah(rutin))
+        and "**Pagi:**" in rutin["explanation"] and "**Malam:**" in rutin["explanation"] and total_benar(rutin)
+        and "Jadwal 4 minggu" not in rutin["explanation"] and "bukan saran medis" in rutin["explanation"]
+        and plan["tipe"] == "rutinitas" and all(f"Minggu {i}" in plan["explanation"] for i in (1, 2, 3))
+        and plan["konteks"]["profil"]["tipe_kulit"] == "kering" and plan["konteks"]["profil"]["budget_max"] == 100000
+        and budget_plan and total_benar(plan) and nomor_rutin["tipe"] == "info_produk",
+        f"langkah={langkah(rutin)}; total={re.search(r'Perkiraan total:[^.]*', rutin['explanation']).group()!r}; "
+        f"plan: profil {plan['konteks']['profil']['tipe_kulit']}/{plan['konteks']['profil']['budget_max']}, "
+        f"langkah={langkah(plan)}; 'harga nomor 1' -> {nomor_rutin['tipe']}")
+
+    # 6.11 (feedback pengguna) obrolan umum soal skincare -> dijawab LLM dengan pagar pengaman: tanpa kartu, profil &
+    # daftar produk tidak berubah, selalu ditutup pengingat untuk mengecek dulu; permintaan produk tetap rekomendasi.
+    # Pemeriksa jawabannya diuji dengan LLM palsu (jawaban yang menyebut merek / angka persen wajib dibuang)
+    def chat_llm(pesan, konteks=None):
+        # kuota Groq per menit bisa habis oleh rentetan pesan uji sebelumnya (bot lalu jujur bilang AI tidak
+        # tersedia) -> tunggu kuota pulih lalu coba lagi, supaya yang diuji memang jawaban obrolan
+        for _ in range(3):
+            _, d = chat(pesan, ob, konteks)
+            if not (d["tipe"] == "klarifikasi" and "nggak tersedia" in d["explanation"]):
+                break
+            __import__("time").sleep(70)
+        return d
+    _, daftar_obrolan = chat("rekomendasiin sunscreen dong", ob)
+    umum = chat_llm("gimana cara pakai sunscreen yang benar?", daftar_obrolan["konteks"])
+    konsep = chat_llm("apa bedanya toner sama essence?")
+    _, tetap = chat("ada sunscreen yang ringan ga?", ob)
+    # pertanyaan soal merek tidak boleh masuk obrolan (LLM di sana dilarang menyebut merek, jadi menolak menjawab):
+    # merek katalog dinilai dari data, merek di luar katalog dijawab jujur
+    _, merek_katalog = chat("apakah skintific bagus?", ob)
+    _, merek_luar = chat("apakah the ordinary bagus?", ob)
+    cbf = _mesin_lokal()  # juga menambahkan models/ ke sys.path
+    from percakapan import Percakapan
+    tanpa_batas = {**ob, "tanpa_batas_budget": False}
+    merek = Percakapan(cbf, _GeneratorObrolanPalsu("Coba pakai Wardah, itu bagus.")).proses(
+        "gimana cara pakai sunscreen yang benar?", None, tanpa_batas)
+    persen = Percakapan(cbf, _GeneratorObrolanPalsu("Pakai niacinamide 10% tiap hari.")).proses(
+        "gimana cara pakai niacinamide yang benar?", None, tanpa_batas)
+    mati = Percakapan(cbf, _GeneratorObrolanPalsu(None)).proses("gimana cara pakai sunscreen yang benar?", None,
+                                                               tanpa_batas)
+    pengingat = "Cek dulu sebelum mempraktikkannya"
+    cek("6.11", "Pertanyaan umum ('cara pakai sunscreen yang benar?', 'bedanya toner sama essence?') -> jawaban "
+                "obrolan tanpa kartu + pengingat untuk mengecek dulu, daftar produk sebelumnya tetap; 'ada sunscreen "
+                "yang ringan ga?' tetap rekomendasi; 'apakah skintific bagus?' dinilai dari data katalog, merek di luar "
+                "katalog dijawab jujur; jawaban LLM yang menyebut merek/angka persen dibuang (diganti "
+                "glosarium atau jawaban jujur), LLM mati -> bilang terus terang",
+        all(d["tipe"] == "obrolan" and not d["recommendation"] and pengingat in d["explanation"] for d in (umum, konsep))
+        and umum["konteks"]["tampil"] == daftar_obrolan["konteks"]["tampil"]
+        and umum["konteks"]["profil"] == daftar_obrolan["konteks"]["profil"]
+        and tetap["tipe"] == "rekomendasi" and tetap["recommendation"]
+        and "produk Skintific" in merek_katalog["explanation"]
+        and all(str(x["brand"]).lower() == "skintific" for x in merek_katalog["recommendation"])
+        and merek_luar["tipe"] == "klarifikasi" and "belum ada di data produk" in merek_luar["explanation"]
+        and merek["tipe"] == "klarifikasi" and "Wardah" not in merek["explanation"]
+        and persen["tipe"] == "info_bahan" and "10%" not in persen["explanation"]
+        and mati["tipe"] == "klarifikasi" and "nggak tersedia" in mati["explanation"],
+        f"cara pakai -> {umum['explanation'][:90]!r}; beda -> {konsep['tipe']}; 'ada ... ga?' -> {tetap['tipe']}; "
+        f"'skintific bagus?' -> {merek_katalog['explanation'][:60]!r}; 'the ordinary' -> {merek_luar['tipe']}; "
+        f"LLM sebut merek -> {merek['explanation'][:60]!r}; LLM sebut persen -> {persen['tipe']}; LLM mati -> "
+        f"{mati['explanation'][:50]!r}")
+
+    # 6.12-6.14 jaring pengaman NLU (temuan uji coba: kalimat di luar pola aturan jatuh ke jalur terdekat yang salah,
+    # mis. "kira kira niacenimide cocok ga?" -> dicari sebagai nama produk). LLM palsu supaya hasilnya pasti.
+    from generate_jawaban import _validasi_maksud
+    nyata = ob  # profil berminyak + jerawat
+    tafsir = {"maksud": "info_bahan", "bahan": [("niacinamide", "naisinamid")], "nama_produk": None}
+    g_bahan = _GeneratorMaksudPalsu(tafsir)
+    bahan_llm = Percakapan(cbf, g_bahan).proses("kira kira naisinamid cocok ga ya?", None, tanpa_batas)
+    g_rek = _GeneratorMaksudPalsu({"maksud": "rekomendasi", "bahan": [], "nama_produk": None})
+    rek_llm = Percakapan(cbf, g_rek).proses("mukaku gimana ya", None, tanpa_batas)
+    # pesan bermerek yang nama produknya tidak ketemu aturan: LLM hanya membantu menemukan nama produk katalognya
+    pesan_merek = "kandungan skintific panthenol gel yang hijau apa aja"
+    nama_llm = Percakapan(cbf, _GeneratorMaksudPalsu(
+        {"maksud": "produk_tertentu", "bahan": [], "nama_produk": "skintific panthenol gel"})).proses(
+        pesan_merek, None, tanpa_batas)
+    nama_llm_benar = nama_llm["tipe"] == "info_produk" and "Panthenol" in nama_llm["explanation"] \
+        and 'tanya soal produk "skintific panthenol gel"' in nama_llm["explanation"]
+    g_jelas = _GeneratorMaksudPalsu(tafsir)
+    for p in ("rekomendasiin serum dong", "niacinamide itu apa", "wardah lightening face mist bagus ga?",
+              "bandingkan wardah sama azarine", "siapa presiden indonesia"):
+        Percakapan(cbf, g_jelas).proses(p, None, tanpa_batas)
+    cek("6.12", "Jaring pengaman NLU: aturan jelas ragu (nama 'produk' yang diambil tidak ada di katalog; pesan soal "
+                "kulit tanpa filter/permintaan) -> LLM memilih jenis pertanyaan, tafsiran yang lolos diarahkan ke jawaban "
+                "yang sesuai dan disebut terbuka beserta kutipannya; pesan yang sudah dipahami aturan tidak memanggil LLM; "
+                "pesan bermerek yang nama produknya tidak ketemu -> LLM membantu menemukan nama produk katalognya",
+        bahan_llm["tipe"] == "info_bahan" and "**Niacinamide" in bahan_llm["explanation"]
+        and "Aku tangkap maksudmu: tanya soal bahan **Niacinamide** (dari \"naisinamid\")" in bahan_llm["explanation"]
+        and bahan_llm["recommendation"] and len(g_bahan.dipanggil) == 1
+        and rek_llm["tipe"] == "rekomendasi" and rek_llm["recommendation"]
+        and "Aku tangkap maksudmu: minta rekomendasi produk" in rek_llm["explanation"]
+        and not g_jelas.dipanggil and nama_llm_benar,
+        f"'kira kira naisinamid cocok ga ya?' -> {bahan_llm['explanation'][:110]!r}, {len(bahan_llm['recommendation'])} "
+        f"kartu; 'mukaku gimana ya' -> {rek_llm['tipe']}, {len(rek_llm['recommendation'])} kartu; LLM dipanggil untuk "
+        f"5 pesan yang jelas: {len(g_jelas.dipanggil)}x; pesan bermerek -> {nama_llm['explanation'][:90]!r}")
+
+    pesan_ragu = "kira kira bakuchiol cocok ga ya?"
+    karang_bahan = Percakapan(cbf, _GeneratorMaksudPalsu(
+        {"maksud": "info_bahan", "bahan": [("retinol", "cocok ga ya")], "nama_produk": None})).proses(
+        pesan_ragu, None, tanpa_batas)
+    karang_produk = Percakapan(cbf, _GeneratorMaksudPalsu(
+        {"maksud": "produk_tertentu", "bahan": [], "nama_produk": "kira kira bakuchiol"})).proses(
+        pesan_ragu, None, tanpa_batas)
+    asing = Percakapan(cbf, _GeneratorMaksudPalsu(
+        {"maksud": "info_bahan", "bahan": [("bakuchiol", "bakuchiol")], "nama_produk": None})).proses(
+        pesan_ragu, None, tanpa_batas)
+    saran_salah = {"maksud": "saran_bahan", "bahan": [], "nama_produk": None}
+    hindari = Percakapan(cbf, _GeneratorMaksudPalsu(saran_salah)).proses(
+        "kandungan apa yang harus dihindari kulit sensitif?", None, tanpa_batas)
+    tanpa_kata_bahan = Percakapan(cbf, _GeneratorMaksudPalsu(saran_salah)).proses("mukaku gimana ya", None, tanpa_batas)
+    # produk bernama yang tidak ada: tafsiran "rekomendasi" ditolak (dulu sempat menampilkan produk lain + harga)
+    rek_salah = Percakapan(cbf, _GeneratorMaksudPalsu({"maksud": "rekomendasi", "bahan": [], "nama_produk": None})
+                           ).proses("kenapa glowy magic serum xyz direkomendasiin?", None, tanpa_batas)
+    # pesan bermerek: tafsiran selain nama produk katalog diabaikan ("somethinc niacinamide" bukan pertanyaan bahan)
+    bermerek = Percakapan(cbf, _GeneratorMaksudPalsu(
+        {"maksud": "info_bahan", "bahan": [("niacinamide", "niacinamide")], "nama_produk": None})).proses(
+        "somethinc niacinamide bagus ga?", None, tanpa_batas)
+    pesan_v = "retinol cocok ga ya"
+    validasi = {"di luar daftar": _validasi_maksud({"maksud": "hapus_data"}, pesan_v),
+                "tidak yakin": _validasi_maksud({"maksud": "tidak_yakin"}, pesan_v),
+                "kutipan bahan karangan": _validasi_maksud(
+                    {"maksud": "info_bahan", "bahan": ["niacinamide"], "bukti": {"niacinamide": "niacinamide"}}, pesan_v),
+                "nama produk karangan": _validasi_maksud(
+                    {"maksud": "produk_tertentu", "nama_produk": "wardah lightening serum"}, pesan_v)}
+    cek("6.13", "Tafsiran LLM yang tidak bisa dipertanggungjawabkan ditolak: jenis di luar daftar / 'tidak yakin' / "
+                "kutipan yang tidak ada di pesan dibuang; bahan yang kutipannya tidak menyebut bahan itu dan produk yang "
+                "tidak ada di katalog -> tanya balik tanpa data karangan; bahan di luar glosarium -> dijawab jujur "
+                "belum ada di glosarium; 'saran bahan' untuk pertanyaan bahan yang DIHINDARI tidak dijawab daftar bahan "
+                "yang dianjurkan, dan untuk pesan tanpa kata kandungan/bahan dianggap tidak paham; pada pesan yang "
+                "menyebut merek, tafsiran selain nama produk katalog diabaikan; pertanyaan tentang produk bernama yang "
+                "tidak ada tidak dibelokkan jadi rekomendasi produk lain",
+        all(v is None for v in validasi.values())
+        and hindari["tipe"] != "info_bahan" and "Ceramide" not in hindari["explanation"]
+        and tanpa_kata_bahan["tipe"] == "klarifikasi" and "Aku belum yakin maksud pesanmu" in tanpa_kata_bahan["explanation"]
+        and bermerek["tipe"] != "info_bahan" and "nggak ada di data aku" in bermerek["explanation"]
+        and rek_salah["tipe"] == "klarifikasi" and not rek_salah["recommendation"]
+        and "nggak ada di data aku" in rek_salah["explanation"]
+        and all(d["tipe"] == "klarifikasi" and "nggak ada di data aku" in d["explanation"] and not d["recommendation"]
+                and "Retinol" not in d["explanation"] for d in (karang_bahan, karang_produk))
+        and asing["tipe"] == "klarifikasi" and "**bakuchiol**: bahan itu belum ada di glosarium" in asing["explanation"]
+        and not asing["recommendation"],
+        f"validasi (semua harus None): {validasi}; bahan karangan -> {karang_bahan['explanation'][:60]!r}; produk "
+        f"karangan -> {karang_produk['tipe']}; bakuchiol -> {asing['explanation'][:70]!r}; 'dihindari' -> {hindari['tipe']}; "
+        f"tanpa kata bahan -> {tanpa_kata_bahan['tipe']}; 'somethinc niacinamide' (LLM bilang bahan) -> "
+        f"{bermerek['tipe']}; 'kenapa glowy magic serum xyz direkomendasiin?' (LLM bilang rekomendasi) -> "
+        f"{rek_salah['tipe']}, {len(rek_salah['recommendation'])} kartu")
+
+    _, awal_jp = chat("rekomendasiin toner dong", nyata)
+    mati_nama = Percakapan(cbf, _GeneratorMaksudPalsu(None)).proses(pesan_ragu, awal_jp["konteks"], nyata)
+    mati_bawaan = Percakapan(cbf, _GeneratorMaksudPalsu(None)).proses("mukaku gimana ya", awal_jp["konteks"], nyata)
+    contoh_tanya = "\"niacinamide itu buat apa?\""
+    cek("6.14", "Titik ragu tapi LLM tidak tersedia / tidak yakin -> tanya balik dengan contoh pertanyaan yang bisa "
+                "dijawab (bukan menebak rekomendasi atau mencari nama produk); daftar produk & profil tetap",
+        all(d["tipe"] == "klarifikasi" and contoh_tanya in d["explanation"] and not d["recommendation"]
+            and d["konteks"]["tampil"] == awal_jp["konteks"]["tampil"]
+            and d["konteks"]["profil"] == awal_jp["konteks"]["profil"] for d in (mati_nama, mati_bawaan))
+        and "nggak ada di data aku" in mati_nama["explanation"]
+        and "Aku belum yakin maksud pesanmu" in mati_bawaan["explanation"],
+        f"nama tidak ketemu -> {mati_nama['explanation'][:70]!r}; pesan tanpa permintaan -> "
+        f"{mati_bawaan['explanation'][:70]!r}; daftar tetap={mati_nama['konteks']['tampil'] == awal_jp['konteks']['tampil']}")
+
+    # 6.15 (temuan uji coba) daftar produk satu merek: "produk wardah apa aja?" dulu diabaikan mereknya
+    def merek_kartu(d):
+        return {str(x["brand"]).lower() for x in d["recommendation"]}
+    _, m1 = chat("produk wardah apa aja?", nyata)
+    _, m2 = chat("yang lain dong", nyata, m1["konteks"])
+    _, m3 = chat("rekomendasiin serum dong", nyata, m2["konteks"])
+    _, m4 = chat("ada sunscreen azarine ga?", nyata)
+    _, m5 = chat("rekomendasiin serum selain wardah dong", nyata)
+    # temuan uji coba: "merek azzarine" (salah ketik Azarine) dulu jatuh ke obrolan umum yang menolak menilai merek
+    _, m6 = chat("merek azzarine", nyata)
+    _, m7 = chat("azzarine", nyata)
+    # merek lain: tanpa "the", merek pendek, dan merek yang tercatat dengan dua ejaan di data
+    lain = {p: chat(p, {**nyata, "budget": None, "tanpa_batas_budget": True})[1]
+            for p in ("produk originote apa aja", "merek omg", "produk hada labo apa aja", "produk skintifik apa aja")}
+    harap = {"produk originote apa aja": {"the originote"}, "merek omg": {"omg"},
+             "produk hada labo apa aja": {"hada labo", "hadalabo"}, "produk skintifik apa aja": {"skintific"}}
+    merek_lain_benar = {p: bool(d["recommendation"]) and merek_kartu(d) <= harap[p] for p, d in lain.items()}
+    # merek yang tidak ada di katalog ("vivalavida") dulu dijawab obrolan umum / rekomendasi umum seolah tidak disebut
+    tanya_asing = "apakah cocok dengan produk vivalavida"
+    asing_mati = Percakapan(cbf, _GeneratorMaksudPalsu(None)).proses(tanya_asing, None, tanpa_batas)
+    asing_obrolan = Percakapan(cbf, _GeneratorMaksudPalsu({"maksud": "obrolan", "bahan": [], "nama_produk": None})
+                               ).proses(tanya_asing, None, tanpa_batas)
+    asing_rek = Percakapan(cbf, _GeneratorMaksudPalsu({"maksud": "rekomendasi", "bahan": [], "nama_produk": None})
+                           ).proses("produk vivalavida apa aja", None, tanpa_batas)
+    # temuan uji coba: "ulasan wardah kebanyakan positif atau negatif?" dulu mencari produk "wardah kebanyakan"
+    _, ul1 = chat("ulasan wardah kebanyakan positif atau negatif?", nyata)
+    _, ul2 = chat("review nomor 1 dong", nyata, ul1["konteks"])
+    katalog_w = __import__("pandas").read_csv(ROOT / "data" / "products_final.csv")
+    w = katalog_w[katalog_w["brand"].astype(str).str.lower().str.strip() == "wardah"]
+    w = w[(w["jml_ulasan"].fillna(0) > 0) & w["skor_sentimen"].notna()]
+    persen_w = round(float((w["skor_sentimen"] * w["jml_ulasan"]).sum() / w["jml_ulasan"].sum()) * 100)
+    ulasan_merek_benar = ul1["tipe"] == "ulasan" and merek_kartu(ul1) == {"wardah"} \
+        and f"**{persen_w}%** positif" in ul1["explanation"] and "wardah kebanyakan" not in ul1["explanation"] \
+        and ul2["tipe"] == "ulasan" and "**#1 " in ul2["explanation"]
+    asing_benar = all(d["tipe"] == "klarifikasi" and 'Produk atau merek "vivalavida" nggak ada di data aku'
+                      in d["explanation"] and not d["recommendation"] for d in (asing_mati, asing_obrolan)) \
+        and asing_rek["recommendation"] and 'merek "vivalavida" belum ada di data aku' in asing_rek["explanation"]
+    cek("6.15", "Minta daftar produk satu merek ('produk wardah apa aja?', 'ada sunscreen azarine ga?') -> hanya produk "
+                "merek itu yang cocok dengan profil, disertai jumlahnya dari seluruh produk merek itu; lanjutan ('yang "
+                "lain dong') tetap merek itu; permintaan baru tanpa merek kembali ke semua merek; 'selain wardah' tidak "
+                "dijadikan filter ke Wardah dan dijawab terus terang; nama merek salah ketik ('merek azzarine', "
+                "'azzarine') tetap dikenali dan disebut terus terang; berlaku untuk merek lain (tanpa 'the', merek "
+                "pendek, merek yang tercatat dengan dua ejaan); merek yang tidak ada di katalog dijawab terus terang "
+                "tidak ada, bukan obrolan umum atau rekomendasi yang mengabaikannya; ulasan satu merek ('ulasan wardah "
+                "kebanyakan positif atau negatif?') dirangkum dari semua produknya dan bisa dilanjutkan per nomor",
+        all(merek_kartu(d) == {"azarine"} and 'tertulis "azzarine"' in d["explanation"] for d in (m6, m7))
+        and all(merek_lain_benar.values()) and asing_benar and ulasan_merek_benar and
+        m1["recommendation"] and merek_kartu(m1) == {"wardah"} and "produk Wardah di data aku" in m1["explanation"]
+        and m2["konteks"]["merek"] == "wardah" and merek_kartu(m2) <= {"wardah"}
+        and not set(_ids(m1)) & set(_ids(m2)) and "Masih produk **Wardah** saja" in m2["explanation"]
+        and m3["konteks"]["merek"] is None and m3["recommendation"] and merek_kartu(m3) != {"wardah"}
+        and merek_kartu(m4) == {"azarine"} and set(_kategori(m4)) == {"sunscreen"}
+        and m5["konteks"]["merek"] is None and "belum bisa mengecualikan merek" in m5["explanation"],
+        f"'produk wardah apa aja?' -> {m1['explanation'][:110]!r}, brand kartu {merek_kartu(m1)}; 'yang lain dong' -> "
+        f"{len(m2['recommendation'])} kartu {merek_kartu(m2)}; 'rekomendasiin serum' -> filter {m3['konteks']['merek']}, "
+        f"brand {merek_kartu(m3)}; azarine -> {merek_kartu(m4)} {set(_kategori(m4))}; 'selain wardah' -> "
+        f"filter {m5['konteks']['merek']}; 'merek azzarine' -> {m6['explanation'][:70]!r} {merek_kartu(m6)}; "
+        f"'azzarine' -> {merek_kartu(m7)}; merek lain: "
+        + "; ".join(f"{p!r} -> {merek_kartu(lain[p])}" for p in lain)
+        + f"; vivalavida (LLM mati) -> {asing_mati['explanation'][:60]!r}; (LLM bilang obrolan) -> {asing_obrolan['tipe']}"
+        f"; (LLM bilang rekomendasi) -> {asing_rek['explanation'][:90]!r}; ulasan wardah -> "
+        f"{ul1['explanation'][:120]!r} (data: {persen_w}%), 'review nomor 1' -> {ul2['tipe']}")
 
 
 # ---------------- BAGIAN 7: error handling & input di luar cakupan ----------------
@@ -1211,6 +1563,36 @@ class _GeneratorPalsu:
 
     def narasi(self, produk_df, profil, pertanyaan=None):
         return {"explanation": "Penjelasan umum.", "alasan_per_produk": [self.klaim] * len(produk_df)}
+
+
+class _GeneratorObrolanPalsu:
+    """Pengganti LLM untuk obrolan umum dengan jawaban yang ditentukan (None = LLM tidak tersedia) -- menguji
+    pemeriksa jawaban obrolan di Percakapan."""
+
+    def __init__(self, jawaban):
+        self.jawaban = jawaban
+
+    def narasi(self, produk_df, profil, pertanyaan=None):
+        return None
+
+    def ngobrol(self, pesan, profil=None, fakta=()):
+        return self.jawaban
+
+
+class _GeneratorMaksudPalsu(_GeneratorObrolanPalsu):
+    """Pengganti LLM untuk jaring pengaman NLU: pahami_maksud mengembalikan tafsiran yang ditentukan (sudah dalam
+    bentuk hasil _validasi_maksud; None = LLM tidak tersedia / tidak yakin) dan mencatat pesan yang ditanyakan."""
+
+    def __init__(self, maksud):
+        super().__init__(None)
+        self.maksud, self.dipanggil = maksud, []
+
+    def pahami_profil(self, pesan, menunggu=None):
+        return None
+
+    def pahami_maksud(self, pesan):
+        self.dipanggil.append(pesan)
+        return self.maksud
 
 
 def _uji_klaim(cbf, klaim, pesan, ob):

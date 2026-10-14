@@ -57,7 +57,8 @@ div[data-testid="stAppViewContainer"] { background:__BG__; }
   border:1px solid transparent !important; border-radius:10px !important;
   height:auto !important; overflow:visible !important;  /* tinggi bawaan 40px memotong garis atas/bawah kotak 47px */
 }
-.st-key-auth_card [data-testid="stNumberInputContainer"]:focus-within { border-color:var(--black) !important; }
+/* garis fokus cukup di kotak input di dalamnya -- kalau wadah ini ikut bergaris, muncul garis ganda */
+.st-key-auth_card [data-testid="stNumberInputContainer"]:focus-within { border-color:transparent !important; }
 .st-key-auth_card [data-baseweb="select"] > div:focus-within,
 .st-key-auth_card [data-baseweb="input"]:focus-within { border-color:var(--black) !important; box-shadow:none !important; outline:none !important; }
 .st-key-auth_card [data-baseweb="select"] div,

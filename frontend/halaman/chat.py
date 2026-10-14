@@ -1,9 +1,12 @@
 """chat.py -- halaman chat utama."""
+import json
 import uuid
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from core import DEWY_THINKING, ICON, css, esc, maskot, panggil
+from halaman import survei
 
 CHAT_CSS = """
 /* area input di bawah */
@@ -37,7 +40,9 @@ div[data-testid="stChatInput"] textarea::placeholder { color:var(--ink-muted); }
 .hero-sub { color:var(--ink-soft); margin-top:.4rem; font-size:.92rem; }
 
 /* bubble */
-div[data-testid="stChatMessage"] { background:transparent !important; gap:1rem; }
+/* padding bawaan 16px atas-bawah per pesan + jarak antar-elemen membuat pertanyaan dan jawaban berjarak 48px */
+div[data-testid="stChatMessage"] { background:transparent !important; gap:1rem; padding-top:.35rem !important;
+  padding-bottom:.35rem !important; }
 div[data-testid="stChatMessageAvatarUser"] { display:none; }
 div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) { justify-content:flex-end; }
 div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageContent"] {
@@ -57,10 +62,10 @@ div[data-testid="stChatMessage"] img[alt$="avatar"] {
 }
 .loading-teks { font-style:italic; color:var(--ink); padding-top:.6rem; }
 
-/* kartu produk -- mulai sejajar tepi kiri avatar (bukan menjorok mengikuti teks), seperti desain */
-.produk-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 250px)); gap:1rem; margin:1rem 0 .4rem; }
-div[data-testid="stChatMessage"] .produk-grid,
-div[data-testid="stChatMessage"] .grup-judul { margin-left:calc(-2.8rem - 1rem); }
+/* kartu produk & judul kelompoknya -- mulai sejajar teks penjelasan di atasnya (di kanan avatar);
+   3 kartu per baris dengan lebar dibagi rata (2 di layar sempit, 1 di HP -- lihat @media di bawah) */
+.produk-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:1rem; margin:1rem 0 .4rem; }
+@media (max-width: 760px) { .produk-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
 .produk-card { background:var(--white); border:1px solid var(--border); border-radius:18px; padding:.75rem; }
 .produk-nama { font-weight:600; font-size:1.02rem; color:var(--black); margin:0 0 .2rem; }
 .produk-meta { font-family:"IBM Plex Mono"; font-size:.78rem; color:var(--ink-soft); }
@@ -95,7 +100,7 @@ div[data-testid="stChatMessage"] .grup-judul { margin-left:calc(-2.8rem - 1rem);
   border-top:1px dashed var(--border); padding-top:.4rem; }
 .grup-judul { font-weight:600; font-size:1rem; color:var(--black); margin:1rem 0 -.2rem; }
 
-/* HP: kartu produk selebar layar (tetap sejajar tepi kiri avatar), bubble user boleh lebih lebar */
+/* HP: kartu produk satu kolom selebar teks penjelasan, bubble user boleh lebih lebar */
 @media (max-width: 640px) {
   .produk-grid { grid-template-columns:1fr; }
   div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageContent"] {
@@ -119,6 +124,107 @@ GUEST_CSS = """
   }
 }
 """
+
+
+# Wadah percakapan Streamlit "menempel ke dasar": setiap konten bertambah ia menganimasikan gulir ke dasar, jadi
+# jawaban panjang (rutinitas, banyak kartu) langsung terlewat sampai ujungnya. Gulir ke atas selama animasi itu tidak
+# dianggap (halaman ditarik turun lagi -> tampak naik-turun berulang); tempelan hanya lepas oleh gulir saat konten diam.
+# Pengatur ini dipasang SEKALI di halaman induk -- bukan di iframe komponen, yang dibuang tiap rerun dan skripnya baru
+# jalan ~100 ms setelah jawaban tampil (terlambat):
+#   kirim()   pesan baru + indikator memuat ditampilkan di dasar, lalu tempelan dilepas selagi konten diam;
+#   jawaban() begitu jawaban masuk ke DOM (MutationObserver, sebelum Streamlit sempat beranimasi) halaman digulir
+#             sekali ke pertanyaan terakhir dan dijaga di sana selama tata letak masih bergeser (~2 dtk);
+# keduanya berhenti begitu pengguna menggulir/menyentuh sendiri.
+_PENGATUR_GULIR = """
+(function () {
+  const VERSI = 1, w = window, doc = document;
+  if (w.__dewaiGulir) { if (w.__dewaiGulir.versi === VERSI) return; w.__dewaiGulir.matikan(); }
+  const henti = new AbortController(), opsi = {capture: true, passive: true, signal: henti.signal};
+  const WADAH = '[data-testid="stAppScrollToBottomContainer"]';
+  let terakhirGulir = 0, disentuh = 0, fase = null, pengamat = null, jawabanTerakhir = -1e9;
+  doc.addEventListener("scroll", e => {
+    if (e.target.matches && e.target.matches(WADAH)) terakhirGulir = performance.now();
+  }, opsi);
+  // hanya gerakan pengguna sungguhan (isTrusted) -- roda gulir tiruan di bawah tidak dihitung
+  for (const t of ["wheel", "touchstart", "pointerdown", "keydown"])
+    doc.addEventListener(t, e => { if (e.isTrusted) disentuh = performance.now(); }, opsi);
+
+  const wadah = () => doc.querySelector(WADAH);
+  // batas atas area terlihat: bilah atas HP / header Streamlit, dan kartu misi survei yang menempel
+  function batasAtas(el) {
+    let atas = el.getBoundingClientRect().top;
+    for (const s of ['.topbar-hp', 'header[data-testid="stHeader"]']) {
+      const b = doc.querySelector(s);
+      if (b && getComputedStyle(b).display !== "none") atas = Math.max(atas, b.getBoundingClientRect().bottom);
+    }
+    const lekat = doc.querySelector('[data-testid="stLayoutWrapper"]:has(> .st-key-misi_survei)');
+    if (lekat && getComputedStyle(lekat).position === "sticky")
+      atas = Math.max(atas, el.getBoundingClientRect().top + parseFloat(getComputedStyle(lekat).top) + lekat.offsetHeight);
+    return atas;
+  }
+  function posisiPertanyaan(el) {
+    const user = [...doc.querySelectorAll('[data-testid="stChatMessage"]')]
+      .filter(m => m.querySelector('[data-testid="stChatMessageAvatarUser"]'));
+    const q = user[user.length - 1];
+    return q ? el.scrollTop + q.getBoundingClientRect().top - batasAtas(el) - 12 : null;
+  }
+  // tidak pernah tepat di dasar (sisa 2px): di dasar Streamlit menganggap pengguna ingin menempel lagi
+  const jepit = (el, y) => Math.max(0, Math.min(y, el.scrollHeight - el.offsetHeight - 2));
+  function aturKe(el, y, pastikan) {
+    // roda gulir menghentikan animasi tempel-ke-dasar yang terlanjur jalan (tanpa animasi: tidak berefek);
+    // fokus membuat Streamlit mencatat tinggi konten sekarang, sehingga gulir berikut dibaca sebagai gulir
+    // pengguna yang melepas tempelan, bukan "konten bertambah" yang menempelkannya lagi
+    el.dispatchEvent(new WheelEvent("wheel", {deltaY: -1, bubbles: true}));
+    el.dispatchEvent(new FocusEvent("focus"));
+    y = jepit(el, y);
+    if (pastikan && Math.abs(el.scrollTop - y) < 1) y = y >= 1 ? y - 1 : y + 1;  // harus ada event gulir
+    el.scrollTop = y;
+  }
+
+  function jawaban() {
+    if (pengamat) { pengamat.disconnect(); pengamat = null; }
+    fase = "jawaban";
+    const mulai = jawabanTerakhir = performance.now();
+    let pertama = true;
+    (function f() {
+      if (fase !== "jawaban" || disentuh > mulai || performance.now() - mulai > 2000) return;
+      const el = wadah(), y = el && posisiPertanyaan(el);
+      if (y != null && (pertama || Math.abs(el.scrollTop - jepit(el, y)) > 2)) { aturKe(el, y, pertama); pertama = false; }
+      requestAnimationFrame(f);
+    })();
+  }
+
+  function kirim() {
+    if (pengamat) pengamat.disconnect();
+    if (!doc.querySelector(".loading-teks")) { jawaban(); return; }  // jawaban sudah masuk duluan
+    fase = "kirim";
+    const mulai = performance.now();
+    pengamat = new MutationObserver(() => { if (!doc.querySelector(".loading-teks")) jawaban(); });
+    pengamat.observe(doc.body, {childList: true, subtree: true});
+    (function f() {
+      if (fase !== "kirim" || disentuh > mulai || performance.now() - mulai > 5000) return;
+      const el = wadah();
+      if (el && performance.now() - terakhirGulir > 220) { aturKe(el, Infinity, true); return; }
+      requestAnimationFrame(f);
+    })();
+  }
+
+  w.__dewaiGulir = {
+    versi: VERSI, kirim,
+    // cadangan dari iframe sesudah jawaban, kalau jawabannya belum tertangani pengamat
+    jawaban: () => { if (fase !== "jawaban" || performance.now() - jawabanTerakhir > 3000) jawaban(); },
+    matikan: () => { henti.abort(); fase = null; if (pengamat) pengamat.disconnect(); },
+  };
+})();
+"""
+
+
+def _skrip_gulir(perintah, n):
+    """iframe tak terlihat: pasang pengatur gulir di halaman induk (sekali per versi), lalu jalankan perintahnya.
+    n membuat isi iframe berbeda tiap kali -- iframe yang isinya sama tidak dimuat ulang Streamlit."""
+    return (f"<script>// {perintah} ke-{n}\n(function () {{\n  const w = window.parent, s = w.document.createElement('script');\n"
+            f"  s.textContent = {json.dumps(_PENGATUR_GULIR)};\n  w.document.head.appendChild(s); s.remove();\n"
+            f"  w.__dewaiGulir.{perintah}();\n}})();</script>")
 
 
 def _rupiah(n):
@@ -202,6 +308,9 @@ def render():
     if not ss.user:
         css(GUEST_CSS)
 
+    if ss.survei_aktif and not ss.survei_terkirim:
+        survei.kartu_misi()
+
     # dibaca duluan supaya pesan baru langsung ikut tampil (hero tidak muncul lagi)
     teks = st.chat_input("Tanya apa aja soal skincare kamu...")
     if teks:
@@ -214,13 +323,18 @@ def render():
 
     for pesan in ss.riwayat_pesan:
         _tampil_pesan(pesan)
+    if ss.pop("gulir_ke_jawaban", False):
+        components.html(_skrip_gulir("jawaban", len(ss.riwayat_pesan)), height=0)
 
     if not teks:
+        if ss.survei_aktif and not ss.survei_terkirim:
+            survei.ajakan_penilaian()
         return
 
     with st.chat_message("assistant", avatar=str(DEWY_THINKING)):
         st.markdown('<div class="loading-teks">Mencari &amp; menyusun rekomendasi...</div>', unsafe_allow_html=True)
-        body = {"message": teks, "onboarding": ss.onboarding, "konteks": ss.konteks}
+        components.html(_skrip_gulir("kirim", len(ss.riwayat_pesan)), height=0)
+        body ={"message": teks, "onboarding": ss.onboarding, "konteks": ss.konteks}
         if ss.user and ss.conversation_id:
             body["conversation_id"] = ss.conversation_id
         data, err, _ = panggil("POST", "/chat", json=body)
@@ -237,4 +351,7 @@ def render():
                              "grup": data.get("grup"), "perbandingan": data.get("perbandingan")})
     if not ss.user:
         _simpan_lokal_guest(teks)
+    if ss.survei_aktif:
+        survei.catat_respons(data)
+    ss.gulir_ke_jawaban = True
     st.rerun()

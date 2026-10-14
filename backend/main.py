@@ -26,6 +26,8 @@ Tambahan terhadap spesifikasi:
      /admin/products/{id}, PUT /admin/products/{id}/status, GET /admin/ringkasan,
      dan GET /admin/opsi-produk. GET /admin/users memakai paginasi (q, halaman,
      per_halaman) dengan field total; key "users" tetap ada.
+  5. Kuesioner SUS di dalam aplikasi: POST /survei (tanpa login, anonim, dibatasi per IP)
+     dan GET /admin/survei (ringkasan skor, penyelesaian misi, seluruh jawaban).
 
 Cara menjalankan (dari root repo):
     uvicorn backend.main:app --reload --port 8000
@@ -56,6 +58,7 @@ from percakapan import Percakapan  # noqa: E402
 
 import auth  # noqa: E402
 import db  # noqa: E402
+import evaluasi_sus  # noqa: E402
 import pembatas  # noqa: E402
 import produk  # noqa: E402
 from email_validator import EmailNotValidError, validate_email  # noqa: E402
@@ -355,6 +358,63 @@ class AdminSetActiveRequest(BaseModel):
     is_active: bool
 
 
+PILIHAN_PERANGKAT = ("HP", "Laptop", "Keduanya")
+PILIHAN_FREKUENSI = ("Setiap hari", "Beberapa kali seminggu", "Jarang", "Tidak pernah")
+TUGAS_SURVEI = ("profil", "rekomendasi", "ulasan", "banding", "ubah_profil")
+
+
+class SurveiRequest(BaseModel):
+    perangkat: str
+    frekuensi: str
+    jawaban: List[int]
+    kualitas: List[int]
+    tugas_selesai: List[str] = []
+    suka: Optional[str] = None
+    perbaiki: Optional[str] = None
+
+    @field_validator("perangkat")
+    @classmethod
+    def _cek_perangkat(cls, v):
+        if v not in PILIHAN_PERANGKAT:
+            raise ValueError(f"Perangkat harus salah satu dari: {', '.join(PILIHAN_PERANGKAT)}.")
+        return v
+
+    @field_validator("frekuensi")
+    @classmethod
+    def _cek_frekuensi(cls, v):
+        if v not in PILIHAN_FREKUENSI:
+            raise ValueError(f"Frekuensi harus salah satu dari: {', '.join(PILIHAN_FREKUENSI)}.")
+        return v
+
+    @field_validator("jawaban")
+    @classmethod
+    def _cek_jawaban(cls, v):
+        if len(v) != 10 or any(n not in (1, 2, 3, 4, 5) for n in v):
+            raise ValueError("Jawaban SUS harus 10 angka, masing-masing 1 sampai 5.")
+        return v
+
+    @field_validator("kualitas")
+    @classmethod
+    def _cek_kualitas(cls, v):
+        if len(v) != evaluasi_sus.JUMLAH_KUALITAS or any(n not in (1, 2, 3, 4, 5) for n in v):
+            raise ValueError(f"Penilaian kualitas jawaban harus {evaluasi_sus.JUMLAH_KUALITAS} angka, "
+                             "masing-masing 1 sampai 5.")
+        return v
+
+    @field_validator("tugas_selesai")
+    @classmethod
+    def _cek_tugas(cls, v):
+        return [t for t in TUGAS_SURVEI if t in set(v)]  # kode tak dikenal dibuang, urutan baku
+
+    @field_validator("suka", "perbaiki")
+    @classmethod
+    def _cek_saran(cls, v):
+        v = (v or "").strip()
+        if len(v) > 1000:
+            raise ValueError("Saran maksimal 1000 karakter.")
+        return v or None
+
+
 # ---------- helper ----------
 
 def _validasi_tipe_masalah(tipe_kulit: Optional[str], masalah_kulit: Optional[str]):
@@ -603,6 +663,41 @@ PER_HALAMAN_MAKS = 100
 def _info_halaman(total, halaman, per_halaman):
     return {"total": total, "halaman": halaman, "per_halaman": per_halaman,
             "jumlah_halaman": max(1, -(-total // per_halaman))}
+
+
+# ---------- /survei (kuesioner SUS di dalam aplikasi) ----------
+
+def batasi_survei(request: Request):
+    tunggu = pembatas.BATAS_SURVEI.coba(request.client.host if request.client else "?")
+    if tunggu:
+        raise HTTPException(429, f"Terlalu banyak penilaian dari perangkat ini. Coba lagi dalam "
+                                 f"{pembatas.teks_tunggu(tunggu)}.", headers={"Retry-After": str(tunggu)})
+
+
+@app.post("/survei", status_code=201, dependencies=[Depends(batasi_survei)])
+def kirim_survei(req: SurveiRequest):
+    """Jawaban kuesioner SUS + penilaian kualitas jawaban (tanpa login, anonim). Skor SUS dihitung di sini
+    dengan rumus yang sama dengan models/evaluasi_sus.py, hanya dari 10 pernyataan SUS."""
+    skor = evaluasi_sus.skor_dari_jawaban(req.jawaban)
+    sid = db.simpan_survei(req.perangkat, req.frekuensi, req.jawaban, skor, req.tugas_selesai, req.suka, req.perbaiki,
+                           kualitas=req.kualitas)
+    return {"id": sid, "skor": skor}
+
+
+@app.get("/admin/survei")
+def admin_survei(_admin: dict = Depends(auth.wajib_admin)):
+    """Hasil survei SUS: ringkasan skor, tingkat penyelesaian tiap misi, rata-rata tiap pernyataan,
+    ringkasan penilaian kualitas jawaban, dan seluruh jawaban (terbaru dulu)."""
+    respon = db.daftar_survei()
+    n = len(respon)
+    return {
+        "ringkasan": evaluasi_sus.ringkas([r["skor"] for r in respon]),
+        "penyelesaian_tugas": {t: (sum(t in r["tugas_selesai"] for r in respon) / n if n else 0.0)
+                               for t in TUGAS_SURVEI},
+        "rata_pernyataan": [sum(r["jawaban"][i] for r in respon) / n if n else None for i in range(10)],
+        "kualitas": evaluasi_sus.ringkas_kualitas([r["kualitas"] for r in respon if r["kualitas"]]),
+        "respon": respon,
+    }
 
 
 @app.get("/admin/ringkasan")

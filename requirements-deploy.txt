@@ -31,6 +31,7 @@ email-validator==2.3.0
 pandas==2.3.3
 numpy==2.4.6
 scikit-learn==1.9.0
+scipy==1.17.1  # dipakai scikit-learn dan perhitungan skor SUS (interval kepercayaan)
 PySastrawi==1.2.1
 
 # RAG (model embedding paraphrase-multilingual-MiniLM-L12-v2)

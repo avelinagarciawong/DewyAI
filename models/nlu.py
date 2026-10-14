@@ -10,6 +10,8 @@ untuk kata >= 9 huruf ("berminyk" -> berminyak, "kombinsi" -> kombinasi).
 """
 import re
 
+import glosarium
+
 # ungkapan sehari-hari ("kayak gorengan", "ketarik", "kulit kendur", "bekas item") ditambahkan
 # 1 Okt 2026 setelah uji manual -- ungkapan yang tidak terdaftar ditangani LLM (lihat perlu_llm)
 TIPE_KULIT = {
@@ -95,6 +97,9 @@ _FRASA = sorted(((sin, jenis, kunci) for jenis, kamus in _KAMUS for kunci, dafta
                  for sin in daftar if " " in sin or "-" in sin), key=lambda x: -len(x[0]))
 _KATA = {sin: (jenis, kunci) for jenis, kamus in _KAMUS for kunci, daftar in kamus.items()
          for sin in daftar if " " not in sin and "-" not in sin}
+# semua sebutan tipe/masalah/kategori, termasuk yang lebih dari satu kata (dipakai _hanya_konsep)
+_POLA_KOSAKATA = re.compile(r"\b(" + "|".join(sorted({re.escape(s) for _, kamus in _KAMUS for daftar in kamus.values()
+                                                      for s in daftar}, key=len, reverse=True)) + r")\b")
 
 
 def normalisasi(teks):
@@ -305,6 +310,21 @@ _POLA_PILIH_SATU = re.compile(
     r"pilih(in|kan)? (satu|1)|(satu|1) (aja|saja) yang|finalnya|mending(an)?|better|worth (dibeli|beli|it)|"
     r"the best|juara(nya)?|pemenang(nya)?|which one|yang paling cocok)\b")
 _POLA_NOMOR_RUJUK = re.compile(r"(?:\b(?:nomor|nmr|no\.?|number|num)|#)\s*(\d+)\b")
+# daftar nomor di pertanyaan pilihan: "nomor 1 dan 2 bagusan mana", "produk 1 atau 3?", "1 sama 2 mending
+# mana" -- angka lanjutan tanpa kata "nomor" ikut dibaca. Angka pertama wajib diawali kata rujukan (atau
+# di awal pesan) supaya "spf 30 atau 50" tidak dianggap nomor produk.
+_AWALAN_NOMOR = r"(?:nomor|nmr|no\.?|number|num|produk|yang|#)"
+_POLA_DAFTAR_NOMOR = re.compile(
+    rf"(?:(?<![\w#]){_AWALAN_NOMOR}\s*|^)\d+(?:\s*(?:,|&|\b(?:dan|sama|atau|vs\.?|versus|and|or|dengan|dgn)\b)"
+    rf"(?:\s*\b(?:dan|sama|atau|and|or)\b)?\s*{_AWALAN_NOMOR}?\s*\d+\b)+")
+
+
+def ekstrak_nomor_pilihan(teks):
+    """"nomor 1 dan 2 bagusan mana?" -> [1, 2] (bukan hanya [1] dari kata "nomor")."""
+    nomor = [int(n) for n in _POLA_NOMOR_RUJUK.findall(teks)]
+    for m in _POLA_DAFTAR_NOMOR.finditer(teks):
+        nomor += [int(n) for n in re.findall(r"\d+", m.group(0))]
+    return list(dict.fromkeys(nomor))
 
 
 # ---------- perbandingan produk ----------
@@ -430,6 +450,10 @@ KRITERIA_URUT = [
 ]
 _URUTAN_RUJUK = re.compile(r"\b(?:yang |produk )?(pertama|kedua|ketiga|keempat|kelima|terakhir)\b")
 _KATA_BUKAN_NAMA = {
+    "kulitku", "kulitmu", "mukaku", "wajahku",  # "X cocok buat kulitku ga?" -- bukan bagian nama produk
+    "apakah", "apa",  # "apakah saya cocok dengan wardah?"
+    # "cara pakai X", "X bagus untuk kulit remaja?" -- penjelas pertanyaan, bukan bagian nama produk
+    "cara", "bagaimana", "aman", "remaja", "dewasa", "pemula",
     "kenapa", "mengapa", "alasan", "alasannya", "why", "direkomendasiin", "direkomendasikan", "direkomendasi",
     "dipilih", "cocok", "buat", "untuk", "aku", "saya", "kamu", "review", "reviewnya", "reviews", "ulasan",
     "ulasannya", "testimoni", "testi", "kata", "orang", "pendapat", "pengalaman", "pakai", "bagus", "jelek",
@@ -496,6 +520,12 @@ _POLA_TERIMA_KASIH = re.compile(r"^(makasih\w*|makasi|terima ?kasih|trims|tengky
                                 r"mksh)\b")
 _POLA_KONFIRMASI = re.compile(r"^(ok(e|ey|ay)?|sip+|siap|baik(lah)?|noted|oh+ (gitu|begitu|oke)|mantap\w*|"
                               r"good|nice|cool|great|alright|oke deh|ok deh|paham|ngerti|got it)$")
+# "itu aja?" / "cuma itu?" / "segitu doang?" (setelah ada daftar: masih ada pilihan lain?) dan "oke itu aja deh" /
+# "itu aja makasih" (penutup) -- dicocokkan pada pesan yang sudah dibuang basa-basinya
+_POLA_ITU_AJA = re.compile(
+    r"(?:(?P<ok>ok(?:e|ey)?|sip+|baik(?:lah)?)\s+)?(?P<cuma>cuma|cuman|hanya|cm)?\s*(?P<itu>itu|ini|segitu|segini)"
+    r"(?:\s+(?P<aja>aja|saja|doang|doank|aj|ajah))?"
+    r"(?:\s+(?P<makasih>makasih\w*|makasi|terima ?kasih|trims|thanks?(?: you)?|thx|tq|mksh))?")
 _POLA_BANTUAN = re.compile(r"\b(kamu siapa|siapa kamu|kamu (itu )?apa|kamu bisa apa|bisa (bantu )?apa( aja| saja)?|"
                            r"fitur(nya)? apa|what can you do|who are you)\b|^(help|bantuan|tolong|menu)$")
 # isian percakapan yang boleh ada di sekitar sapaan/terima kasih ("halo kak", "makasih ya min")
@@ -525,7 +555,8 @@ KOSAKATA_SKINCARE = {
     "squalane", "panthenol", "allantoin", "madecassoside", "propolis", "galactomyces", "alkohol", "alcohol",
     "fragrance", "parfum", "pewangi", "paraben", "bpom", "halal", "tekstur", "texture", "ringan", "lightweight",
     "lengket", "sticky", "meresap", "wangi", "aroma", "busa", "gel", "cream", "krim", "lotion", "oil", "minyaknya",
-    "routine", "rutinitas", "kandungan", "bahan", "ingredients",
+    "routine", "rutinitas", "kandungan", "bahan", "ingredients", "purging", "cleansing", "cleanser", "eksfoliasi",
+    "exfoliasi", "exfoliate", "exfoliating", "layering", "slugging", "komedogenik", "comedogenic",
     "ingredient", "harga", "murah", "mahal", "budget", "cheap", "affordable", "brand", "merek", "merk", "lokal",
     "korea", "korean", "jepang", "sensitif", "iritasi", "kemerahan", "perih", "gatal", "breakout", "bopeng",
     "pigmentasi", "melasma", "dehidrasi", "dehydrated", "barrier", "aging", "penuaan", "pemutih", "whitening",
@@ -557,6 +588,108 @@ _POLA_INFO_KUAT = re.compile(
     r"tidak|kah|nggak sih|ga sih|gak sih|atau (ga|gak|nggak|tidak))\b|"
     r"\bis (it|this|that|number \d+) (any )?(good|worth|safe|suitable)")
 _POLA_INFO_UMUM = re.compile(r"\b(info\w*|informasi|detail\w*|detil\w*|spesifikasi|spek|tentang|tell me about)\b")
+# pertanyaan kecocokan dengan kulit pengguna sendiri, termasuk bentuk yang tidak tertangkap _POLA_INFO_KUAT:
+# "apakah saya cocok dengan wardah?", "aku cocok pakai X?", "X cocok buat kulitku ga?"
+_DIRI = r"(aku|saya|gue|gw|kulitku|kulit (aku|saya|gue)|mukaku|wajahku|muka (aku|saya)|wajah (aku|saya))"
+_POLA_TANYA_COCOK = re.compile(
+    rf"\b(apakah|apa)\s+{_DIRI}\b[^?.!]*\bcocok\w*"
+    rf"|\b{_DIRI}\s+cocok\w*\s+(dengan|sama|pakai|pake|ke)\b"
+    rf"|\bcocok\w*\s+(dengan|sama|untuk|buat|di|ke)\s+{_DIRI}\b"
+    r"|\bcocok\w*\b[^?.!]{0,40}\b(ga|gak|nggak|ngga|enggak|engga|tidak|kah)\s*(sih|ya|kak|min|bot)?\s*\??\s*$")
+# "yang cocok buat kulitku" = minta dicarikan produk, bukan menanyakan kecocokan produk tertentu
+_POLA_YANG_COCOK = re.compile(r"\byang\s+(paling\s+)?cocok")
+# pertanyaan umum soal bahan tanpa produk tertentu: "aman ga pakai produk yang ada alkoholnya?"
+_POLA_BAHAN_UMUM = re.compile(r"\b(produk|skincare|skin care)\s+(yang\s+)?(ada|mengandung|berbahan|pakai|pake)\s+"
+                              r"(kandungan\s+|bahan\s+)?([a-z]{3,})")
+_POLA_TANYA_AMAN = re.compile(r"\b(aman|cocok|boleh|bahaya|berbahaya|baik)\w*")
+# "brand" hasil ekstraksi otomatis yang sebenarnya kata umum -- tidak dipakai sebagai nama brand
+_MEREK_UMUM = {"body", "face", "glow", "glowing", "beauty", "derma", "nature", "natural", "white", "real", "star",
+               "sale", "obat", "ecer", "suns", "original", "skin", "care", "acne", "pure", "fresh", "bright",
+               # nama bahan yang ikut tercatat sebagai brand oleh ekstraksi otomatis
+               "brightening", "centella", "ceramide", "collagen", "kojic", "niacinamide", "whitening",
+               # kata sehari-hari yang ikut tercatat sebagai brand (judul listing, bukan nama brand)
+               "pilih", "salep", "alkohol", "animate", "poise", "diamond", "night", "citra", "stiker", "papaya",
+               "revitalizer", "soothing", "terlaris", "clean", "immortal", "aqua", "dream", "drunk", "banana", "fair",
+               "ultra", "shopee", "organic", "seger", "kemasan", "creme", "golden", "suncreen", "natura", "simple",
+               "satuan", "premium", "kream", "becoming", "bening", "refreshing", "travel", "autumn", "tony",
+               "jelita", "kusuma", "sonik", "belia", "madame"}
+
+
+def cari_merek(teks, kosakata_merek):
+    """Brand katalog yang disebut di teks (yang terpanjang dulu: "hada labo" sebelum "hada"),
+    atau None. Brand pendek (< 4 huruf), kata umum, angka/satuan ("2pcs"), dan kosakata
+    skincare diabaikan supaya kalimat biasa tidak dikira menyebut brand."""
+    for m in sorted(kosakata_merek, key=len, reverse=True):
+        if len(m) < 4 or m in _MEREK_UMUM or m in _KATA or not re.search(r"[a-z]{3}", m) \
+                or re.fullmatch(r"\d+\s*[a-z]{0,3}", m):
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(m)}(?![a-z0-9])", teks):
+            return m
+    return None
+
+
+# pertanyaan soal bahan itu sendiri ("niacinamide itu buat apa?", "bedanya aha sama bha"), dijawab dari glosarium
+_POLA_TANYA_BAHAN = re.compile(
+    r"\b(apa(kah)?\s+itu|apaan|itu\s+apa|tuh\s+apa|fungsi\w*|kegunaan\w*|gunanya|manfaat\w*|khasiat\w*|"
+    r"buat apa|untuk apa|utk apa|bwt apa|efek samping\w*|side effects?|what is|what does|benefits?|"
+    r"bedanya|perbedaan|beda)\b")
+# menilai bahan ("retinol aman ga?", "niacinamide cocok buat kulit berminyak?") -- hanya kalau tidak menyebut
+# kategori, karena "ceramide moisturizer cocok ga?" lebih mungkin menanyakan produk
+_POLA_NILAI_BAHAN = re.compile(r"\b(aman|bahaya|berbahaya|cocok|boleh|bagus|ampuh|ngefek|efektif)\w*")
+_POLA_MINTA_PRODUK = re.compile(r"\b(rekomendasi\w*|rekomen\w*|rekom|recommend\w*|suggest\w*|carikan|cariin|cari|"
+                                r"sarankan|beliin|"
+                                r"produk apa|pakai apa|pake apa|beli apa|yang (paling )?(bagus|cocok|oke|recommended))\b")
+_POLA_RUJUK_TERTENTU = re.compile(r"\b(produk|nomor|no)\s+(ini|itu|tersebut|tadi)\b")
+# "kandungan apa yang cocok", "aku cocoknya pakai kandungan produk apa", "bahan aktif apa buat jerawat",
+# "apa kandungan yang bagus" -- kata tanya menempel pada kata kandungan/bahan ("kandungannya apa" = produk tertentu)
+_POLA_SARAN_BAHAN = re.compile(
+    r"\b(kandungan|bahan(\s+aktif)?|ingredients?|zat(\s+aktif)?)\s+(\w+\s+){0,2}?(apa|apaan|mana)\b"
+    r"|\b(apa|apaan)\s+(aja\s+|saja\s+)?(kandungan|bahan(\s+aktif)?|ingredients?)\s+(yang|yg)\b")
+_POLA_COCOK_BAHAN = re.compile(r"\b(cocok\w*|bagus\w*|sesuai\w*|disarankan|saranin|direkomendasi\w*|rekomen\w*|"
+                               r"baik|perlu|butuh|ampuh|efektif|bantu|membantu|atasi|mengatasi|ngatasin|ngilangin|"
+                               r"menghilangkan)\b")
+_POLA_HINDARI_BAHAN = re.compile(r"\b(hindari|dihindari|hindarin|jangan|bahaya|berbahaya|dilarang|pantangan)\b")
+# rutinitas lengkap / rencana pemakaian beberapa minggu
+_POLA_RUTINITAS = re.compile(
+    r"\b(rutinitas|routine|regimen|steps? (skincare|skin care|perawatan)|"
+    r"urutan (pakai|pemakaian|penggunaan|skincare|skin care|produk)|"
+    r"(skincare|skin care|perawatan) (pagi|malam) (dan|&|sama|atau) (malam|pagi)|"
+    r"(plan|rencana|jadwal|program|planning) (skincare|skin care|perawatan|pemakaian|pakai|produk)|"
+    r"(skincare|skin care|perawatan|plan|rencana|jadwal|program) (untuk |buat |selama )?(se|satu |1 ?)(bulan|minggu)|"
+    r"(plan|rencana|jadwal|program) (untuk |buat |selama )?\d+ (bulan|minggu))")
+_POLA_RENCANA = re.compile(r"\b(bulan|minggu|plan|rencana|jadwal|program|planning|mingguan|bulanan)\b")
+# pertanyaan pengetahuan umum skincare (cara, beda, kapan, perlu tidak) -- bukan minta produk
+_POLA_TANYA_AWAL = re.compile(
+    r"^(gimana|bagaimana|gmn|kenapa|mengapa|knp|apakah|apa (itu|benar|bener|emang|memang)|apa sih|perlukah|"
+    r"bolehkah|benarkah|emang(nya)?|memang(nya)?|seberapa|kapan|how|why|what|when|should|is it|do i|can i)\b")
+_POLA_TANYA_PENGETAHUAN = re.compile(
+    r"\b(cara|tips?|langkah)\s+(pakai|pake|memakai|menggunakan|pemakaian|merawat|perawatan|mengatasi|ngatasin|"
+    r"atasi|menghilangkan|ngilangin|hilangin|mencegah|cegah|memilih|milih|pilih|apply|aplikasi\w*|layering|biar|"
+    r"agar|supaya|menjaga|jaga|bikin|membuat|membersihkan|bersihin)\b"
+    r"|\b(bedanya|perbedaan|berapa kali|berapa lama|seberapa sering|kapan (waktu|sebaiknya|harus|pakai)|"
+    r"pagi (atau|apa|ato) malam|malam (atau|apa|ato) pagi|sebelum (atau|apa) sesudah|"
+    r"\w+ (dulu|duluan) (atau|apa|ato) \w+ (dulu|duluan))\b"
+    r"|\b(perlu|harus|wajib|boleh|penting)\s+(ga|gak|nggak|ngga|enggak|engga|tidak|kah)\b"
+    r"|\b(purging|skin barrier|double cleansing|layering|patch test|uji tempel|skin cycling|slugging|"
+    r"non comedogenic|non-comedogenic|komedogenik)\b")
+_POLA_CARA_PAKAI = re.compile(r"\b(cara|gimana|bagaimana)\s+(pakai|pake|memakai|menggunakan|pemakaian|penggunaan)\w*|"
+                              r"\bhow to use\b")
+_KATA_PERBANDINGAN = {"beda", "bedanya", "perbedaan", "perbedaannya", "difference", "antara", "vs", "versus",
+                      "lebih", "between", "and", "the", "what", "is", "fungsi", "fungsinya", "kegunaan"}
+
+
+def _hanya_konsep(teks):
+    """"apa bedanya toner sama essence?" / "beda kulit kering dan dehidrasi" -- isinya hanya kosakata
+    kategori/tipe/masalah, jadi pertanyaan konsep untuk obrolan, bukan perbandingan produk tertentu."""
+    sisa = _POLA_KOSAKATA.sub(" ", teks)
+    return sisa != teks and all(t in _KATA_UMUM or t in _KATA_TANYA or t in _KATA_PERBANDINGAN
+                                or _PARTIKEL.fullmatch(t) for t in re.findall(r"[a-z]+", sisa))
+
+
+# "ada ga ...", "apakah ada ...", "gimana kalau toner aja" = minta / ubah rekomendasi
+_POLA_BUKAN_PENGETAHUAN = re.compile(
+    r"\b(ada (ga|gak|nggak|ngga|enggak|engga|tidak)|apakah ada|adakah|ada yang|"
+    r"(gimana|bagaimana|gmn) (kalau|kalo|klo|kl|dengan|sama|dgn))\b|\baja( deh| dong| ya)?\s*\??$")
 _KATA_FUNGSI_EN = {"i", "im", "my", "me", "you", "your", "can", "could", "would", "will", "the", "a", "an", "to",
                    "for", "of", "in", "on", "with", "and", "or", "is", "are", "am", "be", "it", "this", "that",
                    "there", "some", "any", "just", "so", "do", "does", "s"}
@@ -689,7 +822,8 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
          "masalah_kulit": [], "masalah_tambah": False, "budget": {}, "jumlah": None, "jumlah_flag": None,
          "kategori": [], "kategori_reset": False, "kategori_tidak_dikenal": None, "multi": [],
          "rujukan": None, "atribut": None, "pilih_satu": False, "urut": None, "preferensi_ulasan": None,
-         "medis": [], "medis_lunak": bool(_POLA_MEDIS_LUNAK.search(teks)), "banding_implisit": None}
+         "medis": [], "medis_lunak": bool(_POLA_MEDIS_LUNAK.search(teks)), "banding_implisit": None,
+         "merek": None, "bahan": None, "rencana": False, "cara_pakai": False}
     if not re.search(r"[a-z0-9]", teks):
         a["intent"] = "kosong"
         return a
@@ -711,6 +845,14 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
     if _POLA_KONFIRMASI.fullmatch(inti):
         a["intent"] = "konfirmasi"
         return a
+    m = _POLA_ITU_AJA.fullmatch(inti)
+    if m and (m.group("cuma") or m.group("aja")):
+        if m.group("ok") or m.group("makasih") or re.search(r"\b(deh|dulu)\b", teks):
+            a["intent"] = "terima_kasih" if m.group("makasih") else "konfirmasi"  # menutup, bukan pesan tak jelas
+            return a
+        if (ada_hasil or ada_banding) and (m.group("cuma") or m.group("itu") != "ini"):  # "ini aja" = pilih yang ini
+            a["intent"] = "alternatif"  # "itu aja?" setelah daftar tampil = masih ada pilihan lain?
+            return a
     if _POLA_BANTUAN.search(inti):
         a["intent"] = "bantuan"
         return a
@@ -720,13 +862,46 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
             a["intent"] = "ubah_profil"
             return a
 
+    # pertanyaan soal bahan itu sendiri -> glosarium. Yang menyebut brand, nomor, atau "produk ini" tetap
+    # pertanyaan produk ("somethinc niacinamide bagus ga?"), dan permintaan produk tetap rekomendasi
+    bahan = glosarium.semua(teks)
+    # nama bahan salah ketik ("niacenimide itu apa") -- dicoba hanya kalau tidak ada nama bahan yang ditulis persis
+    tebakan = [] if bahan else glosarium.tebak_salah_ketik(teks)
+    if tebakan:
+        bahan = list(dict.fromkeys(kunci for _, kunci, _ in tebakan))
+    if bahan and not _POLA_NOMOR_RUJUK.search(teks) and not _POLA_RUJUK_TERTENTU.search(teks) \
+            and not _POLA_MINTA_PRODUK.search(teks) and not cari_merek(teks, kosakata_merek):
+        sebut = [s for s in _cari_sebutan(teks) if not s["dinegasi"]]
+        if _POLA_TANYA_BAHAN.search(teks) or (_POLA_NILAI_BAHAN.search(teks)
+                                              and not any(s["jenis"] == "kategori" for s in sebut)):
+            a["intent"], a["bahan"] = "info_bahan", bahan
+            a["bahan_tebakan"] = [(kata, alias) for kata, _, alias in tebakan]  # disebut terus terang di jawaban
+            # "niacinamide cocok buat kulit berminyak?" -> dijawab untuk kulit berminyak, profil tidak diubah
+            a["tipe_kulit"] = next((s["kunci"] for s in sebut if s["jenis"] == "tipe"), None)
+            a["masalah_kulit"] = list(dict.fromkeys(s["kunci"] for s in sebut if s["jenis"] == "masalah"))
+            return a
+    # "kandungan apa yang cocok buat kulitku?" -- bahan yang umumnya dipakai untuk masalah kulit pengguna
+    # (glosarium), bukan kandungan produk tertentu: yang menyebut nomor, "produk ini", atau brand tetap pertanyaan
+    # produk, dan "kandungan apa yang harus dihindari" bukan pertanyaan ini
+    if not bahan and _POLA_SARAN_BAHAN.search(teks) and not _POLA_HINDARI_BAHAN.search(teks) \
+            and not _POLA_NOMOR_RUJUK.search(teks) and not _POLA_RUJUK_TERTENTU.search(teks) \
+            and not cari_merek(teks, kosakata_merek):
+        sebut = [s for s in _cari_sebutan(teks) if not s["dinegasi"]]
+        if _POLA_COCOK_BAHAN.search(teks) or any(s["jenis"] in ("tipe", "masalah") for s in sebut):
+            a["intent"] = "saran_bahan"
+            a["tipe_kulit"] = next((s["kunci"] for s in sebut if s["jenis"] == "tipe"), None)
+            a["masalah_kulit"] = list(dict.fromkeys(s["kunci"] for s in sebut if s["jenis"] == "masalah"))
+            return a
+    rutin = bool(_POLA_RUTINITAS.search(teks))
+
     # perbandingan dicek duluan: nama produk yang dibandingkan sering memuat kata
     # kategori/tipe kulit ("wardah lightening toner") yang BUKAN permintaan ganti filter
     a["atribut"] = next((nama for nama, pola in ATRIBUT if pola.search(teks)), None)
     # "yang bagusan mana" (tanpa atribut spesifik) -> pilih 1 pemenang; kalau
     # atributnya disebut ("yang ratingnya paling bagus") itu pertanyaan atribut
     a["pilih_satu"] = bool(_POLA_PILIH_SATU.search(teks)) and a["atribut"] in (None, "kecocokan")
-    if _POLA_BANDING.search(teks) or (_POLA_BEDA.search(teks) and re.search(r"\b(sama|dengan|dan|vs)\b", teks)):
+    if _POLA_BANDING.search(teks) or (_POLA_BEDA.search(teks) and re.search(r"\b(sama|dengan|dan|vs)\b", teks)
+                                      and not _hanya_konsep(teks)):
         a["intent"] = "banding"
         a["rujukan"] = ekstrak_rujukan_banding(teks)
         return a
@@ -744,14 +919,18 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
     # pertanyaan lanjutan soal produk yang sedang dibahas -- dicek sebelum
     # filter, karena nama produk yang ditanya bisa memuat kata kategori/kulit
     a["urut"] = next((nama for nama, pola in KRITERIA_URUT if pola.search(teks)), None)
-    if ada_hasil and (_POLA_URUT.search(teks) or (a["urut"] and _POLA_URUT_POSISI.search(teks))):
+    if ada_hasil and not rutin and (_POLA_URUT.search(teks) or (a["urut"] and _POLA_URUT_POSISI.search(teks))):
         a["intent"] = "urutkan"
         return a
     rujukan = ekstrak_rujukan_produk(teks)
     # tanpa daftar sebelumnya pun "kenapa produk ini direkomendasiin?" tetap
     # pertanyaan alasan (dijawab "belum ada rekomendasi"), bukan minta rekomendasi baru
     merujuk = re.search(r"\b(ini|itu|tersebut|tadi)\b", teks)
-    if _POLA_ALASAN.search(teks) and (
+    # "kenapa kulit berminyak gampang jerawatan?" = pertanyaan umum soal kulit, bukan alasan rekomendasi
+    tanya_kulit = bool(_POLA_TANYA_AWAL.search(teks)) and not (rujukan["nomor"] or merujuk) \
+        and not re.search(r"\b(direkomendasi\w*|dipilih|rekomen\w*|recommend\w*)\b", teks) \
+        and any(s["jenis"] in ("tipe", "masalah") for s in _cari_sebutan(teks)) and not cari_merek(teks, kosakata_merek)
+    if _POLA_ALASAN.search(teks) and not tanya_kulit and (
             ((ada_hasil or ada_banding or rujukan["nama"]) and (_POLA_RUJUK_PRODUK.search(teks) or rujukan["nama"]))
             or re.search(r"\b(direkomendasi\w*|dipilih)\b", teks)):
         a["intent"], a["rujukan"] = "alasan", rujukan
@@ -763,6 +942,35 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
             a["preferensi_ulasan"] = "Negatif"
         elif re.search(r"\b(bagus|positif|baik|oke|puas)\w*", teks):
             a["preferensi_ulasan"] = "Positif"
+        return a
+    # pertanyaan umum soal bahan tanpa produk tertentu -> dijawab terus terang (data per produk),
+    # bukan dicari sebagai nama produk ("kering alkoholnya")
+    m_bahan = _POLA_BAHAN_UMUM.search(teks)
+    if m_bahan and _POLA_TANYA_AMAN.search(teks) and not rujukan["nomor"] and not merujuk:
+        a["intent"], a["bahan"] = "bahan_umum", re.sub(r"nya$", "", m_bahan.group(5))
+        return a
+    # pertanyaan kecocokan dengan kulit pengguna: produk tertentu, nomor di daftar, atau satu brand
+    # ("apakah aku cocok dengan wardah?") -- dinilai dari data, bukan rekomendasi baru
+    merek = cari_merek(teks, kosakata_merek)
+    if merek:
+        # brand dihitung hanya kalau memang yang ditanyakan ("produk wardah", "wardah cocok...", "cocok dengan
+        # wardah"), bukan sekadar muncul di dalam nama produk panjang yang ditanya harganya
+        m = re.escape(merek)
+        if not re.search(rf"\b(produk|produknya|brand|merek|merk)\s+{m}\b|\b{m}\s+cocok"
+                         rf"|\bcocok\w*\s+(dengan|sama|pakai|pake|ke)\s+(produk\s+)?{m}\b", teks):
+            merek = None
+    tanya_cocok = (bool(_POLA_TANYA_COCOK.search(teks)) and not _POLA_YANG_COCOK.search(teks)) \
+        or bool(merek and re.search(r"\bcocok\w*", teks))
+    # pertanyaan harga/rating/kandungan tetap ditangani jalur info di bawah walau ada kata "cocok"
+    if tanya_cocok and a["atribut"] in (None, "kecocokan") and not _POLA_MINTA_BARU.search(teks) \
+            and not a["pilih_satu"] \
+            and (rujukan["nomor"] or rujukan["nama"] or merujuk or merek or ada_hasil or ada_banding):
+        sebut = [s for s in _cari_sebutan(teks) if not s["dinegasi"]]
+        a["intent"], a["rujukan"], a["atribut"], a["merek"] = "info_produk", rujukan, "kecocokan", merek
+        # "wardah cocok ga buat kulit sensitif?" -> dinilai untuk kulit sensitif, TANPA mengubah profil
+        a["tipe_kulit"] = next((s["kunci"] for s in sebut if s["jenis"] == "tipe"), None)
+        a["masalah_kulit"] = list(dict.fromkeys(s["kunci"] for s in sebut if s["jenis"] == "masalah"))
+        a["kategori"] = list(dict.fromkeys(s["kunci"] for s in sebut if s["jenis"] == "kategori"))
         return a
     # info satu/beberapa produk ("harga nomor 2 berapa?", "bahan aktifnya apa?",
     # "wardah lightening face mist bagus ga?") -- bukan minta rekomendasi baru
@@ -827,7 +1035,7 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
     elif a["pilih_satu"] and (ada_hasil or ada_banding) and not ada_slot:
         a["intent"] = "pilih_satu"
         a["tipe_tidak_dikenal"] = a["masalah_tidak_dikenal"] = None
-        a["rujukan"] = {"nomor": [int(n) for n in _POLA_NOMOR_RUJUK.findall(teks)], "nama": [], "semua": False}
+        a["rujukan"] = {"nomor": ekstrak_nomor_pilihan(teks), "nama": [], "semua": False}
     elif ada_hasil and (a["jumlah"] or a["jumlah_flag"]) and not ada_slot:
         a["intent"] = "ubah_jumlah"
     elif menunggu == "pilih_field" and not ada_slot and not (a["jumlah"] or a["jumlah_flag"]) \
@@ -838,6 +1046,34 @@ def analisis(pesan, menunggu=None, ada_hasil=False, ada_banding=False, kosakata_
     elif a["intent"] == "rekomendasi" and not ada_slot and not (a["jumlah"] or a["jumlah_flag"]):
         # tanpa filter apa pun: masih minta rekomendasi skincare, atau di luar topik / tidak jelas?
         a["intent"] = _cakupan(teks_tanpa_harga, kosakata_merek) or "rekomendasi"
+
+    if rutin and a["intent"] in ("rekomendasi", "alternatif", "lebih_murah", "ubah_jumlah", "tidak_jelas"):
+        # rutinitas memakai beberapa kategori sekaligus: filter kategori & jumlah tidak berlaku,
+        # tipe/masalah/budget yang disebut tetap diterapkan ke profil
+        a["intent"], a["rencana"] = "rutinitas", bool(_POLA_RENCANA.search(teks))
+        a["kategori"], a["multi"], a["kategori_tidak_dikenal"] = [], [], None
+        a["jumlah"] = a["jumlah_flag"] = None
+    elif a["intent"] == "rekomendasi" and not (a["budget"] or a["jumlah"] or a["jumlah_flag"]
+                                               or a["kategori_reset"] or a["kategori_tidak_dikenal"]) \
+            and not rujukan["nomor"] and not _POLA_RUJUK_TERTENTU.search(teks) \
+            and not _POLA_MINTA_PRODUK.search(teks) and not _POLA_BUKAN_PENGETAHUAN.search(teks) \
+            and (_POLA_TANYA_PENGETAHUAN.search(teks)
+                 # "gimana sunscreen yang ringan?" = minta produk, "kenapa kulit berminyak gampang jerawatan?" bukan
+                 or (_POLA_TANYA_AWAL.search(teks) and not (a["kategori"] and re.search(r"\byang\b", teks)))):
+        a["tipe_tidak_dikenal"] = a["masalah_tidak_dikenal"] = None
+        a["perlu_llm"] = False
+        merek = cari_merek(teks, kosakata_merek)
+        if merek:
+            # "apakah skintific bagus?" / "cara pakai skintific 5x ceramide?" menyangkut brand/produk katalog ->
+            # dijawab dari data produk, bukan obrolan LLM (yang tidak boleh menyebut merek). Profil tidak diubah
+            a["intent"], a["rujukan"] = "info_produk", rujukan
+            if _POLA_CARA_PAKAI.search(teks):
+                a["cara_pakai"] = True
+            else:
+                a["atribut"], a["merek"] = "kecocokan", merek
+        else:
+            # pertanyaan pengetahuan umum -> dijawab LLM dengan batasan (Percakapan._obrolan); profil tidak diubah
+            a["intent"] = "obrolan"
     return a
 
 

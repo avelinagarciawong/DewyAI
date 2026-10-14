@@ -77,6 +77,8 @@ def state_awal():
         "percakapan_lokal": {},  # riwayat guest, hanya di sesi ini
         "halaman": "chat",
         "pesan_login": None,  # alasan user diarahkan ke halaman login (mis. sesi berakhir)
+        # mode survei SUS (?survei=1): misi yang sudah selesai, sudah kirim penilaian, notifikasi misi
+        "survei_aktif": False, "survei_tugas": [], "survei_terkirim": False, "survei_toast": None,
     }
     for k, v in default.items():
         st.session_state.setdefault(k, v)
@@ -310,8 +312,8 @@ STAT_CSS = """
 
 
 def angka(n):
-    """1234 -> '1.234' (pemisah ribuan Indonesia)."""
-    return f"{n:,}".replace(",", ".")
+    """1234 -> '1.234' (pemisah ribuan Indonesia); teks (mis. grade "B+") diteruskan apa adanya."""
+    return n if isinstance(n, str) else f"{n:,}".replace(",", ".")
 
 
 def stat_tiles(stats):

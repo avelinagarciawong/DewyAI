@@ -15,6 +15,11 @@ Setiap pesan chat diproses empat tahap (diatur oleh `models/percakapan.py`):
    pesan. Aturan (kamus kata, salah ketik, negasi, perumpamaan) bekerja lebih dulu. LLM hanya
    dipanggil kalau aturan tidak yakin, dan jawabannya hanya diterima kalau nilainya ada di daftar
    baku dan buktinya dikutip persis dari pesan pengguna.
+   **Jaring pengaman**: kalau aturan jelas ragu (nama "produk" yang diambil dari kalimat tidak ada
+   di katalog, atau pesan soal kulit tanpa filter maupun kata permintaan), LLM diminta memilih jenis
+   pertanyaannya. Bahan harus ada di glosarium dan memang disebut di pesan, produk harus ada di
+   katalog, dan tafsirannya selalu disebut di jawaban. Kalau LLM gagal atau tidak yakin, chatbot
+   bertanya balik, tidak menebak.
 2. **CBF** (`models/cbf_engine.py`) memilih produk paling cocok dari 961 produk dengan TF-IDF dan
    cosine similarity atas lima fitur: tipe kulit, masalah kulit, kategori, kandungan, deskripsi
    (bobot 4/4/4/2/1).
@@ -22,6 +27,25 @@ Setiap pesan chat diproses empat tahap (diatur oleh `models/percakapan.py`):
    ChromaDB.
 4. **LLM** (`models/generate_jawaban.py`, lewat API Groq) menulis jawaban hanya berdasarkan produk dan
    ulasan tadi. Kalau LLM tidak tersedia, penjelasan disusun otomatis dari data produk.
+
+Selain rekomendasi, chatbot bisa:
+
+- **Menampilkan produk satu merek** ("produk wardah apa aja?", "ada sunscreen azarine ga?"): hanya
+  produk merek itu yang cocok dengan profil, beserta jumlahnya dari seluruh produk merek itu. Lanjutan
+  seperti "yang lain dong" tetap di merek itu sampai ada permintaan baru tanpa menyebut merek.
+  "Ulasan wardah kebanyakan positif atau negatif?" dirangkum dari semua produk merek itu.
+- **Membandingkan merek** ("bandingkan wardah dengan azarine, bagusan yang mana?"): tabel dari data
+  (jumlah produk yang cocok dengan kulit pengguna, ulasan positif, rating, harga tengah, produk paling
+  cocok tiap merek) dan kesimpulan; kalau unggulnya terbelah, disebut untung-ruginya.
+- **Menyusun rutinitas & rencana 1 bulan**: satu produk katalog per langkah (facial wash, toner,
+  serum, moisturizer, sunscreen), urutan pagi/malam, total harga, dan jadwal pengenalan 4 minggu.
+- **Menjelaskan bahan aktif** ("niacinamide itu buat apa?", nama salah ketik juga dikenali) dari
+  glosarium terkurasi `models/glosarium.py`, lalu menampilkan produk katalog yang mengandung bahan
+  itu. "Kandungan apa yang cocok buat kulitku?" dijawab dengan bahan glosarium untuk masalah kulit
+  pengguna.
+- **Menjawab pertanyaan umum skincare** ("cara pakai sunscreen yang benar?") lewat LLM dengan
+  batasan: tanpa merek, tanpa diagnosis atau dosis, kalimat berangka persen dibuang, dan selalu
+  ditutup pengingat untuk mengecek dulu sebelum dipraktikkan.
 
 Aplikasinya terdiri dari backend **FastAPI** (`backend/`, database SQLite untuk akun, riwayat chat,
 dan katalog produk) dan frontend **Streamlit** (`frontend/`), termasuk panel admin untuk mengelola
@@ -103,6 +127,7 @@ Tanpa index, chatbot tetap berjalan, hanya tanpa kutipan ulasan.
 python tests/uji_skenario_chatbot.py [--bagian N]   # butuh backend lengkap jalan di :8000 (dengan GROQ_API_KEY)
 python tests/uji_login_register.py [--bagian N]     # menyalakan backend & frontend sendiri; butuh Google Chrome
 python tests/uji_admin.py [--bagian 1..7]           # menyalakan backend sendiri
+python tests/uji_survei.py [--bagian 1|2]           # survei SUS; menyalakan backend & frontend sendiri
 ```
 
 ## Evaluasi
@@ -112,6 +137,14 @@ python tests/uji_admin.py [--bagian 1..7]           # menyalakan backend sendiri
 - **NLU**: `python models/evaluasi_nlu.py`. Membandingkan empat pendekatan (aturan saja, hibrida
   aturan + LLM, kemiripan embedding, zero-shot NLI) pada set uji kalimat berlabel manual
   `data/uji_nlu.csv`.
+- **Usability (SUS)**: responden membuka alamat aplikasi dengan tambahan `?survei=1`. Halaman chat
+  menampilkan kartu misi (isi profil, minta rekomendasi, tanya ulasan, bandingkan produk, ubah kondisi
+  kulit) yang tercentang otomatis, lalu kuesioner SUS 10 pernyataan dan 5 pernyataan kualitas jawaban
+  (relevansi rekomendasi, pemahaman pesan, kejelasan alasan, manfaat ulasan, kepercayaan informasi;
+  terpisah dari skor SUS). Jawaban tersimpan anonim di database; panel admin **Survey Results**
+  menampilkan skor rata-rata, grade, penyelesaian misi, ringkasan kualitas jawaban, dan unduhan CSV.
+  CSV itu dapat diolah ulang dengan `python models/evaluasi_sus.py [csv]` (rata-rata, interval
+  kepercayaan 95%, grade Sauro & Lewis, kategori acceptability Bangor dkk., dan ringkasan kualitas jawaban).
 
 ## Pipeline data
 

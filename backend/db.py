@@ -124,6 +124,20 @@ def init_db():
             is_active INTEGER NOT NULL DEFAULT 1,
             versi INTEGER NOT NULL DEFAULT 1
         );
+
+        -- jawaban kuesioner SUS dari mode survei (?survei=1). Anonim: tidak terhubung
+        -- ke akun. jawaban = JSON 10 angka 1-5 (SUS 1..10), tugas_selesai = JSON kode misi
+        CREATE TABLE IF NOT EXISTS survei_sus (
+            id TEXT PRIMARY KEY,
+            perangkat TEXT NOT NULL,
+            frekuensi TEXT NOT NULL,
+            jawaban TEXT NOT NULL,
+            skor REAL NOT NULL,
+            tugas_selesai TEXT NOT NULL,
+            suka TEXT,
+            perbaiki TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     # kolom yang ditambahkan belakangan -- database lama (chatbot.db yang sudah
     # berisi akun) ikut diperbarui tanpa kehilangan data
@@ -131,6 +145,7 @@ def init_db():
     _tambah_kolom(conn, "conversations", "konteks", "TEXT")      # ingatan percakapan (JSON) untuk dilanjutkan
     _tambah_kolom(conn, "conversations", "diperbarui", "TEXT")   # waktu pesan terakhir (urutan riwayat)
     _tambah_kolom(conn, "messages", "data", "TEXT")              # kartu produk/tabel jawaban bot (JSON)
+    _tambah_kolom(conn, "survei_sus", "kualitas", "TEXT")        # 5 jawaban penilaian kualitas jawaban (JSON)
     conn.commit()
     conn.close()
 
@@ -277,6 +292,27 @@ def jumlah_admin_aktif() -> int:
     n = conn.execute("SELECT COUNT(*) FROM users WHERE role='Admin' AND is_active=1").fetchone()[0]
     conn.close()
     return n
+
+
+def simpan_survei(perangkat, frekuensi, jawaban, skor, tugas_selesai, suka=None, perbaiki=None, kualitas=None) -> str:
+    sid = buat_uuid()
+    conn = get_conn()
+    conn.execute("INSERT INTO survei_sus (id, perangkat, frekuensi, jawaban, skor, tugas_selesai, suka, perbaiki, "
+                 "kualitas) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (sid, perangkat, frekuensi, json.dumps(jawaban), skor, json.dumps(tugas_selesai), suka, perbaiki,
+                  json.dumps(kualitas) if kualitas else None))
+    conn.commit()
+    conn.close()
+    return sid
+
+
+def daftar_survei() -> list:
+    """Semua jawaban survei, terbaru dulu."""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM survei_sus ORDER BY created_at DESC, rowid DESC").fetchall()
+    conn.close()
+    return [{**dict(r), "jawaban": json.loads(r["jawaban"]), "tugas_selesai": json.loads(r["tugas_selesai"]),
+             "kualitas": json.loads(r["kualitas"]) if r["kualitas"] else []} for r in rows]
 
 
 def ringkasan():

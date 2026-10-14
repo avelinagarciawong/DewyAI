@@ -1,29 +1,10 @@
-"""
-percakapan.py -- lapisan orkestrasi chat: pesan user + konteks percakapan
--> baca maksudnya (nlu.py) -> panggil CBF (+ LLM buat prosa) -> respons
-terstruktur + konteks baru.
 
-Backend tetap stateless: seluruh "ingatan" percakapan (profil yang diubah
-lewat chat, produk yang sudah tampil, dst) ada di dict `konteks` yang dikirim
-bolak-balik dengan frontend tiap pesan. Konteks dari client divalidasi ulang
-di sini, karena client tidak boleh dipercaya begitu saja.
-
-Keputusan desain:
-  - Profil awal = isian form onboarding. Perubahan tipe kulit / masalah kulit
-    / budget lewat chat BERLAKU sampai diganti lagi di percakapan itu; field
-    yang tidak disebut tetap. Profil di form/akun tidak ikut berubah.
-  - Jumlah produk TIDAK sticky: permintaan baru tanpa angka -> TOP_N_DEFAULT.
-    "2 aja deh" / "banyakin" setelah ada hasil -> potong/tambah dari hasil
-    yang SAMA (konteks["pool"]), bukan cari ulang dari nol.
-  - Yang ditampilkan hanya produk yang relevan (CBFEngine.recommend(
-    hanya_relevan=True)); bila yang relevan kurang dari yang diminta, bilang
-    terus terang, jangan diisi produk asal-asalan.
-"""
 import copy
 import re
 
 import pandas as pd
 
+import glosarium
 import nlu
 from cbf_engine import MASALAH_KULIT_VALID, TIPE_KULIT_VALID
 
@@ -49,7 +30,9 @@ _KATA_UMUM_NAMA = {t for s in nlu._SINONIM_KATEGORI for t in re.findall(r"[a-z0-
     "g", "series", "new", "spf", "pa", "the", "wajah", "muka", "kulit", "dan", "untuk", "with", "for", "sabun",
     "pembersih", "ultimate", "premium", "all", "size", "travel", "mini", "pcs", "isi", "paket", "set"}
 _ISIAN_NAMA = {"produk", "yang", "yg", "dong", "ya", "deh", "aja", "saja", "tolong", "coba", "si", "nya", "itu",
-               "ini", "tadi", "merek", "merk", "brand"}
+               "ini", "tadi", "merek", "merk", "brand",
+               # "ulasan wardah KEBANYAKAN positif?" -- kata kira-kira, bukan bagian nama produk
+               "kebanyakan", "umumnya", "mayoritas", "rata", "secara", "umum", "overall", "keseluruhan"}
 # ulasan yang isinya soal pengiriman/penjual, bukan produknya -- tidak dikutip
 # (pola yang sama dengan penyaring di pipeline/label_sentimen.py, ditambah
 # paket/packing/seller karena lolos dari penyaring itu)
@@ -89,10 +72,59 @@ PANJANG_KUTIPAN = 240
 # pesan berisi beberapa permintaan: intent yang tidak perlu dijawab sendiri kalau
 # ada permintaan lain di pesan yang sama, dan intent yang sama-sama "cari produk"
 _TANPA_ISI = {"kosong", "tidak_jelas", "sapaan", "terima_kasih", "konfirmasi"}
+_ISYARAT_MEREK = {"merek", "merk", "brand", "produk", "produknya", "dari"}  # kata sebelum nama brand ("merek azarine")
+# kata yang lazim setelah "produk ..." tapi bukan nama brand/produk ("produk alami", "produk buat bumil") -- pelengkap
+# kosakata nlu (_KATA_UMUM, _KATA, KOSAKATA_SKINCARE) untuk _nama_asing
+_BUKAN_NAMA = {"alami", "natural", "organik", "organic", "vegan", "tadi", "kecantikan", "perawatan", "pria", "cowok",
+               "laki", "wanita", "cewek", "remaja", "anak", "bayi", "bumil", "hamil", "menyusui", "dokter", "klinik",
+               "apotek", "apotik", "lengkap", "paket", "sejenis", "serupa", "mirip", "luar", "import", "impor", "dalam",
+               "negeri", "indonesia", "thailand", "china", "cina", "eropa", "amerika", "drugstore", "premium", "seller",
+               "bestseller", "anti", "terbaru", "terpercaya", "favorit", "andalan", "unggulan", "kekinian", "hits",
+               "kayak", "seperti", "macam", "jenis", "tipe", "kategori", "kamu", "kalian", "km", "kmu", "lainnya",
+               "tertentu", "tersebut", "tsb", "pernah", "sering", "jarang", "selalu", "kadang", "biasa", "biasanya",
+               "sudah", "udah", "belum", "masih", "sekarang", "skrg", "dulu", "kemarin", "kemaren", "apapun", "manapun",
+               "bikin", "membuat", "buatan", "punya", "milik", "pakai", "pake", "dipakai", "cuma", "hanya", "terus",
+               "tetap", "sekali", "banget", "semua", "beberapa", "banyak", "sedikit", "teman", "temen", "kakak", "mama",
+               "ibu", "adik", "pacar", "suami", "istri", "rumah", "harian", "sehari", "pagi", "malam", "siang"}
+# perbandingan brand ("bandingkan wardah dengan azarine, bagusan yang mana?"): pemisah antar brand, dan kata pilihan/
+# perbandingan yang bukan bagian nama brand (_merek_dibanding)
+_PEMISAH_MEREK = re.compile(r"\s*(?:,|&|/|\bdengan\b|\bdgn\b|\bsama\b|\bvs\.?|\bversus\b|\bdan\b|\batau\b|\bato\b|"
+                            r"\bor\b|\band\b|\bapa\b)\s*")  # "wardah apa emina" = wardah atau emina
+_KATA_PILIH = {"bagusan", "bagusnya", "bagus", "lebih", "mending", "mendingan", "pilih", "pilihan", "terbaik", "unggul",
+               "oke", "worth", "better", "best", "rekomen", "cocok", "cocokan", "beda", "bedanya", "perbedaan", "versus",
+               "compare", "kira", "kira-kira", "menurutmu", "menurut", "kamu",
+               # "aku cocoknya pakai cosrx atau wardah?", "enaknya beli wardah apa emina"
+               "pakai", "pake", "dipakai", "beli", "dibeli", "mau", "pengen", "enak", "baik", "sebaiknya", "buat",
+               "untuk", "aku", "saya", "gue", "kulit", "kulitku"}
+# tanda perbandingan/pilihan antar-brand; "atau"/"cocok" juga, karena perbandingan brand baru dipakai kalau tiap
+# bagian kalimat memang hanya nama brand (_merek_dibanding)
+_POLA_BANDING_MEREK = re.compile(r"\b(banding\w*|compare|vs|versus|bagusan|bagusnya|mending\w*|lebih (bagus|baik|oke|"
+                                 r"cocok)|yang mana|mana yang|pilih|atau|ato|or|apa|cocok\w*)\b")
+_SELESAI_NAMA = {"cocok", "bagus", "ga", "gak", "nggak", "ngga", "enggak", "apa", "aja", "saja", "dong", "ya", "sih",
+                 "nih", "deh", "buat", "untuk", "yang", "yg", "itu", "ini", "gimana", "kah"}  # akhir nama yang ditulis
 _KELUARGA_REKOMENDASI = {"rekomendasi", "alternatif", "lebih_murah", "ubah_jumlah"}
 CATATAN_MEDIS_LUNAK = ("_Catatan: ini produk skincare umum yang dijual bebas, bukan obat. Kalau keluhannya parah, "
                        "meradang, atau nggak membaik, sebaiknya konsultasi ke dokter kulit._")
 CATATAN_TANPA_LLM = "_(Penjelasan AI lagi nggak tersedia, jadi penjelasannya aku susun otomatis dari data.)_"
+# rutinitas: (kategori, kapan dipakai). Serum hanya kalau ada masalah kulit; toner opsional
+LANGKAH_RUTIN = [("facial_wash", "pagi & malam"), ("toner", "pagi & malam, opsional"), ("serum", "malam"),
+                 ("moisturizer", "pagi & malam"), ("sunscreen", "pagi")]
+_BAHAN_KERAS = ("retinol", "aha", "salicylic_acid", "benzoyl_peroxide")  # mulai pelan, jangan ditumpuk
+_BAHAN_DIHINDARI = ("alkohol", "pewangi")  # ditanya untuk dihindari -> jangan tampilkan produk yang mengandungnya
+CATATAN_RUTIN = ("_Ini rencana umum, bukan saran medis. Hentikan pemakaian kalau muncul perih, gatal, atau kemerahan "
+                 "yang tidak hilang, dan konsultasikan ke dokter kulit kalau keluhannya berat. Hasil skincare biasanya "
+                 "baru terlihat setelah beberapa minggu pemakaian rutin._")
+CATATAN_OBROLAN = ("_Ini info umum dari AI, bukan saran medis, dan bisa saja keliru. Cek dulu sebelum "
+                   "mempraktikkannya, misalnya dengan uji tempel atau tanya dokter kulit._")
+_POLA_BUKAN_KANDUNGAN = re.compile(r"\b(bersama|dipadukan|dikombinasikan|digabung\w*|dibarengi|tanpa|bebas|non|"
+                                   r"tidak mengandung|hindari|jangan)\b[^.,;\n]{0,40}|\b[a-z]+[ -]free\b")
+_POLA_LANGGAR_OBROLAN = re.compile(r"https?://|www\.|\d+(?:[.,]\d+)?\s*%|\b\d+\s*mg\b", re.I)
+MAKS_OBROLAN = 1400
+# merek yang sering disebut LLM tapi tidak ada di katalog -- jawaban obrolan tidak boleh menyebut merek apa pun
+_MEREK_TERKENAL = frozenset({"la roche posay", "la roche-posay", "the ordinary", "paula's choice", "paulas choice",
+                             "neutrogena", "bioderma", "eucerin", "aveeno", "innisfree", "kiehl's", "clinique",
+                             "sk-ii", "skii", "avene", "vichy", "mario badescu", "drunk elephant", "la mer",
+                             "cerave", "cetaphil", "skinceuticals", "differin", "beauty of joseon"})
 _ALASAN_MEDIS = {
     "obat resep": "obat resep dokter",
     "obat minum & dosis": "obat minum atau dosis",
@@ -209,6 +241,7 @@ class Percakapan:
         self._kategori_id = dict(zip(cbf.df["id"], cbf.df["kategori"]))
         self._merek = frozenset(cbf.df["brand"].dropna().astype(str).str.lower().str.strip())
         self._token_merek = {t for m in self._merek for t in _token_nama(m)}
+        self._siapkan_merek()
         self._indeks_nama = []
         for _, r in cbf.df.iterrows():
             dasar = nlu.normalisasi_nama(f"{r['nama_produk']} {'' if _kosong(r['brand']) else r['brand']}")
@@ -222,6 +255,14 @@ class Percakapan:
         self._teks_sumber = {r["id"]: " ".join("" if _kosong(r[c]) else str(r[c]) for c in
                                                ("nama_produk", "kandungan", "deskripsi") if c in r).lower()
                              for _, r in cbf.df.iterrows()}
+        # bahan glosarium per produk: dari nama + kandungan; deskripsi hanya kalau kandungannya kosong, tanpa
+        # sebutan yang bukan berarti "mengandung" ("bekerja baik bersama retinol", "bebas alkohol", "alcohol free")
+        self._bahan_produk = {}
+        for _, r in cbf.df.iterrows():
+            isi = "" if _kosong(r["kandungan"]) else str(r["kandungan"])
+            if not isi and not _kosong(r.get("deskripsi")):
+                isi = _POLA_BUKAN_KANDUNGAN.sub(" ", str(r["deskripsi"]).lower())
+            self._bahan_produk[r["id"]] = set(glosarium.semua(f"{r['nama_produk']} {isi}"))
         berulasan = cbf.df[cbf.df["jml_ulasan"].fillna(0) > 0]["skor_sentimen"].dropna()
         self._prior_sentimen = float(berulasan.mean()) if not berulasan.empty else 0.5
 
@@ -235,9 +276,12 @@ class Percakapan:
         # "yang lain dong" tidak boleh menampilkan ulang produk-produk ini
         # gagal: berapa kali berturut-turut bot tidak paham jawaban atas pertanyaan profil
         k = {"profil": profil_dari_onboarding(onboarding or {}), "kategori": [], "menunggu": None, "gagal": 0,
-             "pool": [], "tampil": [], "alasan": {}, "banding": [], "fokus": "tampil", "sudah_tampil": []}
+             "pool": [], "tampil": [], "alasan": {}, "banding": [], "fokus": "tampil", "sudah_tampil": [],
+             "merek": None}
         if not isinstance(konteks, dict):
             return k
+        if konteks.get("merek") in self._merek:  # filter merek (lihat _terapkan_merek)
+            k["merek"] = konteks["merek"]
         lama = konteks.get("profil") if isinstance(konteks.get("profil"), dict) else {}
         p = k["profil"]
         if lama.get("tipe_kulit") in TIPE_KULIT_VALID:
@@ -320,6 +364,200 @@ class Percakapan:
         if a["intent"] in ("tidak_jelas", "di_luar_topik"):
             a["intent"] = "rekomendasi"
         a["dari_llm"] = hasil
+
+    def _titik_ragu(self, a, k):
+        """Titik di mana aturan nlu.py jelas tidak yakin:
+        'nama'   -- semua nama "produk" yang diambil dari kalimat tidak ada di katalog, tanpa nomor/brand
+                    ("kira kira niacenimide cocok ga?" -> produk "kira kira niacenimide");
+        'bawaan' -- pesan soal kulit tanpa filter dan tanpa kata permintaan apa pun, yang oleh aturan langsung
+                    dijadikan rekomendasi. Permintaan yang jelas ("rekomendasiin dong") tidak termasuk.
+        None -> aturan cukup yakin, jaring pengaman tidak dipakai."""
+        r = a["rujukan"] or {}
+        if a["intent"] in ("info_produk", "ulasan", "alasan", "banding") and r.get("nama") and not r.get("nomor") \
+                and not r.get("semua") and all(self._cari_nama(n)["status"] == "tidak_ketemu" for n in r["nama"]):
+            if not (a["merek"] or self._cari_merek(a["teks"])[0]):
+                return "nama"
+            # menyebut brand katalog ("kandungan skintific panthenol gel yang hijau apa aja") = produk brand itu: LLM
+            # hanya boleh membantu menemukan nama produknya, bukan menafsirkan ulang jadi pertanyaan bahan/obrolan
+            # ("somethinc niacinamide bagus ga?" pernah ditafsirkan sebagai bahan niacinamide)
+            return "nama_merek" if a["intent"] != "banding" else None
+        # "produk vivalavida apa aja?" / "apakah cocok dengan produk vivalavida" -> nama yang tidak ada di katalog
+        # jangan diabaikan (rekomendasi umum) atau dinilai obrolan umum
+        nama = self._nama_asing(a) if a["intent"] in ("rekomendasi", "obrolan", "tidak_jelas", "di_luar_topik") \
+            and not k["menunggu"] else None
+        if nama:
+            a["rujukan"], a["nama_asing"] = {"nomor": [], "nama": [nama], "semua": False}, nama
+            return "nama"
+        if a["intent"] == "rekomendasi" and not k["menunggu"] and not a["perlu_llm"] \
+                and not (a["tipe_kulit"] or a["masalah_kulit"] or a["budget"] or a["kategori"] or a["kategori_reset"]
+                         or a["multi"] or a["jumlah"] or a["jumlah_flag"] or a["kategori_tidak_dikenal"]) \
+                and not any(p.search(a["teks"]) for p in (nlu._POLA_MINTA_SKINCARE, nlu._POLA_MINTA_BARU,
+                                                          nlu._POLA_MINTA_PRODUK)) \
+                and not nlu.cari_merek(a["teks"], _MEREK_TERKENAL) \
+                and not self._cari_merek(a["teks"])[0]:  # "wardah" / "merek azzarine" = daftar produk brand itu
+            return "bawaan"
+        return None
+
+    def _nama_asing(self, a):
+        """Nama yang ditulis tepat setelah kata produk/merek/brand ("produk vivalavida apa aja?") tapi bukan brand atau
+        produk katalog, bukan kata umum/kosakata skincare/nama bahan -- kemungkinan brand atau produk yang tidak ada
+        di data. return: nama itu (paling banyak 4 kata), atau None."""
+        m = re.search(r"\b(?:produk|merek|merk|brand)(?:-produk|nya)?\s+([a-z][a-z0-9'&.-]*(?:\s+[a-z0-9'&.-]+){0,5})",
+                      a["teks"])
+        if not m:
+            return None
+        kata = []
+        for t in m.group(1).split():
+            if t in _SELESAI_NAMA or nlu._PARTIKEL.fullmatch(t) or len(kata) == 4:
+                break
+            kata.append(t)
+        if not kata:
+            return None
+        awal = kata[0]
+        if len(awal) < 4 or (len(awal) > 5 and awal.endswith(("ku", "mu"))) \
+                or awal in nlu._KATA_UMUM or awal in nlu._KATA or awal in nlu.KOSAKATA_SKINCARE \
+                or awal in nlu._KATA_TANYA or awal in _BUKAN_NAMA or glosarium.semua(awal) \
+                or glosarium.tebak_salah_ketik(awal) or self._cari_merek(a["teks"])[0] \
+                or self._cari_nama(" ".join(kata))["status"] != "tidak_ketemu":
+            return None
+        return " ".join(kata)
+
+    def _jaring_pengaman(self, a, k, pesan, ragu):
+        """Tafsiran LLM di titik ragu, dicek lagi: bahan harus ada di glosarium DAN kutipannya memang menyebut bahan
+        itu, produk harus ketemu di katalog. Lolos -> a diarahkan ke jawaban yang sesuai (tafsirannya disebut terbuka
+        lewat _catatan_maksud). return: respons (tanya balik / bahan di luar glosarium), atau None kalau jawaban
+        dilanjutkan seperti biasa."""
+        pahami = getattr(self.generator, "pahami_maksud", None)
+        m = pahami(pesan) if pahami else None
+        maksud = m["maksud"] if m else None
+        if ragu == "nama_merek":
+            # hanya nama yang menunjuk tepat satu produk katalog yang diterima; selain itu jawaban aturan biasa
+            # (rangkuman ulasan brand, kecocokan brand, atau terus terang produknya tidak ada)
+            if maksud == "produk_tertentu" and self._cari_nama(m["nama_produk"])["status"] == "ketemu":
+                a["rujukan"] = {"nomor": [], "nama": [m["nama_produk"]], "semua": False}
+                a["maksud_llm"] = {"maksud": maksud, "nama": m["nama_produk"]}
+            return None
+        if maksud == "info_bahan":
+            kunci, asing = [], []
+            for nama, bukti in m["bahan"]:
+                kc = glosarium.semua(nama)
+                if not kc:
+                    asing.append(bukti)
+                elif self._bukti_bahan(bukti, kc[0]):
+                    kunci.append((kc[0], bukti))
+            if kunci:
+                a["intent"], a["bahan"] = "info_bahan", list(dict.fromkeys(x for x, _ in kunci))
+                a["maksud_llm"] = {"maksud": maksud, "bahan": kunci}
+                return None
+            if asing:
+                return self._bahan_di_luar_glosarium(k, asing)
+            maksud = None  # kutipannya tidak menyebut bahan yang diklaim -> sama dengan tidak paham
+        if maksud == "produk_tertentu":
+            if self._cari_nama(m["nama_produk"])["status"] == "tidak_ketemu":
+                maksud = None
+            else:
+                if a["intent"] not in ("info_produk", "ulasan", "alasan"):
+                    a["intent"] = "info_produk"
+                a["rujukan"] = {"nomor": [], "nama": [m["nama_produk"]], "semua": False}
+                a["maksud_llm"] = {"maksud": maksud, "nama": m["nama_produk"]}
+                return None
+        if maksud == "saran_bahan":
+            if not re.search(r"\b(kandungan\w*|bahan\w*|ingredients?|zat)\b", a["teks"]):
+                maksud = None  # tidak menyebut kandungan/bahan sama sekali -> tafsiran tidak berdasar
+            elif nlu._POLA_HINDARI_BAHAN.search(a["teks"]):
+                # "kandungan apa yang harus DIHINDARI" bukan "yang cocok" -> jangan dijawab daftar bahan yang dianjurkan;
+                # dijawab sebagai pertanyaan umum (mode obrolan, dengan batasannya)
+                maksud = "obrolan"
+            else:  # "... buat kulit sensitif?" -> dinilai untuk itu, profil tidak diubah
+                sebut = [s for s in nlu._cari_sebutan(a["teks"]) if not s["dinegasi"]]
+                a["tipe_kulit"] = a["tipe_kulit"] or next((s["kunci"] for s in sebut if s["jenis"] == "tipe"), None)
+                a["masalah_kulit"] = a["masalah_kulit"] or list(dict.fromkeys(
+                    s["kunci"] for s in sebut if s["jenis"] == "masalah"))
+        if a.get("nama_asing") and maksud == "obrolan":
+            maksud = None  # menyebut produk/merek tertentu -> obrolan umum tidak boleh menilainya
+        if ragu == "nama" and maksud == "rekomendasi" and not a.get("nama_asing") and self._jelas_tanya_produk(a):
+            # "kenapa glowy magic serum xyz direkomendasiin?" menanyakan produk bernama yang tidak ada -> jangan
+            # dibelokkan jadi rekomendasi produk lain (seolah produknya ada); bilang terus terang
+            maksud = None
+        if maksud in ("saran_bahan", "rekomendasi", "obrolan", "di_luar_topik"):
+            a["intent"] = maksud
+            if maksud != "di_luar_topik":  # jawaban di luar topik sudah menjelaskan dirinya sendiri
+                a["maksud_llm"] = {"maksud": maksud}
+            return None
+        return self._tanya_balik(a, k, ragu)
+
+    @staticmethod
+    def _jelas_tanya_produk(a):
+        """Pertanyaan yang jelas menanyakan satu produk bernama: alasan/ulasan/perbandingan, atribut produk (harga,
+        kandungan, rating), atau nama yang memuat kosakata produk ("glowy magic serum xyz"). Berbeda dengan
+        "aku cocoknya pakai produk apa" (nama "cocoknya"), yang memang wajar ditafsirkan minta rekomendasi."""
+        return a["intent"] in ("alasan", "ulasan", "banding") \
+            or a["atribut"] in ("harga", "kandungan", "rating", "sentimen") \
+            or any(len(n.split()) >= 2 and any(t in nlu._KATA for t in n.split()) for n in (a["rujukan"] or {})
+                   .get("nama", []))
+
+    @staticmethod
+    def _bukti_bahan(bukti, kunci):
+        """Kutipan dari pesan memang menyebut bahan itu: alias persis, atau salah ketik yang dekat dengan salah satu
+        aliasnya. Batasnya sedikit lebih longgar dari tebakan salah ketik di nlu.py karena LLM ikut menyatakannya."""
+        if kunci in glosarium.semua(bukti):
+            return True
+        kata = bukti.split()
+        for alias in glosarium.per_kunci(kunci)["alias"]:
+            n = len(alias.split())
+            for i in range(len(kata) - n + 1):
+                potong = " ".join(kata[i:i + n])
+                if len(potong) >= 5 and glosarium._jarak(potong, alias) <= (2 if max(len(potong), len(alias)) < 9 else 3):
+                    return True
+        return False
+
+    def _bahan_di_luar_glosarium(self, k, asing):
+        nama = ", ".join(f"**{x}**" for x in dict.fromkeys(asing))
+        daftar = ", ".join(e["nama"].split(" (")[0] for e in glosarium.GLOSARIUM)
+        return self._respons(k, "klarifikasi",
+                             f"Kalau yang kamu maksud bahan {nama}: bahan itu belum ada di glosarium aku, jadi aku belum "
+                             "bisa menjelaskannya (lebih baik nggak aku tebak). Bahan yang bisa aku jelaskan: "
+                             f"{daftar}. Tanya misalnya \"niacinamide itu buat apa?\".")
+
+    def _tanya_balik(self, a, k, ragu):
+        """Aturan ragu dan LLM tidak membantu (tidak tersedia, tidak yakin, atau tafsirannya tidak lolos) -> bilang
+        terus terang dan beri contoh pertanyaan yang bisa dijawab, bukan menebak."""
+        contoh = ["tanya soal bahan, misalnya \"niacinamide itu buat apa?\"",
+                  "tanya bahan yang cocok buat kulitmu: \"kandungan apa yang cocok buat kulitku?\"",
+                  "minta rekomendasi, misalnya \"rekomendasiin serum dong\""]
+        if ragu == "nama":
+            jenis = "Produk atau merek" if a.get("nama_asing") or re.search(r"\b(merek|merk|brand)\b", a["teks"]) \
+                else "Produk"
+            nama = [" ".join(t for t in n.split() if t not in _ISIAN_NAMA) or n for n in a["rujukan"]["nama"]]
+            teks = [" ".join(f"{jenis} \"{n}\" nggak ada di data aku, jadi aku nggak bisa kasih info apa pun soal "
+                             f"{jenis.lower()} itu (aku nggak mau mengarang data produk yang nggak ada)." for n in nama),
+                    "Kalau itu nama produk, coba tulis lebih lengkap atau cek ejaannya. Kalau maksudmu yang lain, kamu "
+                    "bisa:"]
+        else:
+            teks = ["Aku belum yakin maksud pesanmu, jadi lebih baik nggak aku tebak. Kamu bisa:"]
+            contoh.append("ceritakan kondisi kulitmu, misalnya \"kulitku berminyak dan jerawatan\"")
+        teks.append("\n".join(f"- {c}" for c in contoh))
+        return self._respons(k, "klarifikasi", "\n\n".join(teks))
+
+    @staticmethod
+    def _catatan_maksud(a):
+        """Tafsiran jaring pengaman selalu disebut terbuka (beserta kutipannya), supaya user bisa mengoreksi."""
+        m = a.get("maksud_llm")
+        if not m:
+            return ""
+        if m["maksud"] == "rekomendasi" and a.get("nama_asing"):
+            return (f"_(Produk atau merek \"{a['nama_asing']}\" belum ada di data aku, jadi ini rekomendasi dari produk "
+                    "lain di katalog.)_")
+        if m["maksud"] == "info_bahan":
+            label = "tanya soal bahan " + ", ".join(
+                f"**{glosarium.per_kunci(x)['nama'].split(' (')[0]}**"
+                + ("" if x in glosarium.semua(bukti) else f" (dari \"{bukti}\")") for x, bukti in m["bahan"])
+        elif m["maksud"] == "produk_tertentu":
+            label = f"tanya soal produk \"{m['nama']}\""
+        else:
+            label = {"saran_bahan": "tanya bahan yang cocok buat kulitmu", "rekomendasi": "minta rekomendasi produk",
+                     "obrolan": "pertanyaan umum soal perawatan kulit"}[m["maksud"]]
+        return f"_(Aku tangkap maksudmu: {label}. Kalau keliru, tulis ulang pertanyaanmu ya.)_"
 
     @staticmethod
     def _catatan_llm(a):
@@ -443,14 +681,46 @@ class Percakapan:
         # disebut (skenario 4.1b), BUKAN rekomendasi baru lalu dipilih satu. Syaratnya
         # minimal satu nama benar-benar produk di katalog; nama lain yang tidak
         # ketemu/ambigu dilaporkan terus terang oleh _banding.
-        if a["banding_implisit"] and a["intent"] not in ("ulasan", "alasan") \
+        if a["banding_implisit"] and a["intent"] not in ("ulasan", "alasan", "info_bahan", "saran_bahan", "obrolan",
+                                                          "rutinitas") \
                 and any(self._cari_nama(n)["status"] == "ketemu" for n in a["banding_implisit"]["nama"]):
             a["intent"], a["rujukan"] = "banding", a["banding_implisit"]
         # NLU hybrid: aturan nlu.py tidak yakin (cerita/perumpamaan soal kulit yang tidak
         # tertangkap kosakata) -> minta tafsiran LLM; gagal/tidak paham -> perilaku aturan biasa
         if a["perlu_llm"] and a["intent"] in ("rekomendasi", "tidak_jelas", "di_luar_topik"):
             self._pahami_dengan_llm(a, k, pesan)
+        if a["intent"] in ("banding", "banding_atribut", "pilih_satu", "rekomendasi", "info_produk", "obrolan",
+                           "tidak_jelas", "di_luar_topik") and _POLA_BANDING_MEREK.search(a["teks"]):
+            dibanding = self._merek_dibanding(a["teks"])
+            if dibanding and dibanding[1]:  # salah satunya brand yang tidak ada di data -> terus terang
+                nama = self._nama_merek(dibanding[0][0][0])
+                return self._respons(k, "klarifikasi", " ".join(
+                    f"Merek \"{x}\" belum ada di data produk aku, jadi nggak bisa aku bandingkan (aku nggak mau mengarang)."
+                    for x in dibanding[1]) + f" Mau lihat produk {nama} yang cocok buat kulitmu? Bilang aja \"produk "
+                    f"{nama.lower()} apa aja\".")
+            if dibanding:  # yang dibandingkan brand, bukan produk tertentu
+                return self._banding_merek(a, k, dibanding[0])
+        if a["intent"] in ("tidak_jelas", "di_luar_topik"):
+            # isinya hanya nama brand yang salah ketik ("azzarine", "brand skintifik") -> daftar produk brand itu
+            _, tertulis = self._cari_merek(a["teks"])
+            sisa = set(re.findall(r"[a-z0-9]+", a["teks"])) - set((tertulis or "").split()) - _ISYARAT_MEREK - nlu.STOP
+            if tertulis and not any(not nlu._PARTIKEL.fullmatch(t) for t in sisa):
+                a["intent"] = "rekomendasi"
+        # jaring pengaman NLU: aturan sudah memilih jalur tapi jelas ragu -> LLM memilih jenis pertanyaan (lalu
+        # dicek lagi ke glosarium/katalog); gagal, tidak yakin, atau tidak lolos -> tanya balik, bukan menebak
+        ragu = self._titik_ragu(a, k)
+        if ragu:
+            balik = self._jaring_pengaman(a, k, pesan, ragu)
+            if balik:
+                return balik
+        r = self._tanggapi(a, k, pesan)
+        catatan = self._catatan_maksud(a)
+        if catatan:
+            r["explanation"] = f"{catatan}\n\n{r['explanation']}"
+        return r
 
+    def _tanggapi(self, a, k, pesan):
+        """Hasil analisis (sudah termasuk tafsiran LLM, kalau ada) -> jawaban yang sesuai."""
         if a["intent"] == "kosong":
             return self._respons(k, "klarifikasi",
                                  "Pesannya kosong atau kurang jelas nih. Coba ceritakan kondisi kulit kamu atau "
@@ -462,9 +732,24 @@ class Percakapan:
                 k["menunggu"] = a["pilih_field"]
                 return self._respons(k, "klarifikasi", self._tanya_field(a["pilih_field"], k))
             return self._gagal_paham(k, "pilih_field", None, [])
+        luar = nlu.cari_merek(a["teks"], _MEREK_TERKENAL - self._merek) \
+            if a["intent"] in ("tidak_jelas", "di_luar_topik", "obrolan", "rekomendasi") else None
+        if luar:  # brand yang tidak ada di katalog -> jujur, jangan dinilai dari pengetahuan umum LLM
+            return self._respons(k, "klarifikasi",
+                                 f"Merek \"{luar.title()}\" belum ada di data produk aku, jadi aku nggak bisa menilainya. Aku "
+                                 "cuma menilai produk dan merek yang ada di katalog, misalnya \"apakah aku cocok dengan "
+                                 "produk wardah?\", atau minta rekomendasi sesuai kulit kamu.")
         if a["intent"] in ("tidak_jelas", "di_luar_topik", "medis", "sapaan", "terima_kasih", "konfirmasi",
                            "bantuan"):
             return self._di_luar_rekomendasi(a, k)
+        if a["intent"] == "bahan_umum":
+            return self._bahan_umum(a, k)
+        if a["intent"] == "info_bahan":
+            return self._info_bahan(a, k)
+        if a["intent"] == "saran_bahan":
+            return self._saran_bahan(a, k)
+        if a["intent"] == "obrolan":
+            return self._obrolan(a, k, pesan)
         if a["intent"] == "info_produk":
             return self._info_produk(a, k)
         if a["intent"] in ("banding", "banding_atribut"):
@@ -484,6 +769,8 @@ class Percakapan:
         if a["masalah_tidak_dikenal"] and not a["masalah_kulit"]:
             return self._gagal_paham(k, "masalah_kulit", a["masalah_tidak_dikenal"], catatan)
         k["menunggu"], k["gagal"] = None, 0
+        if a["intent"] == "rutinitas":
+            return self._rutinitas(a, k, pesan, catatan)
 
         if a["kategori_tidak_dikenal"]:
             daftar = ", ".join(nlu.LABEL_KATEGORI.values())
@@ -491,6 +778,15 @@ class Percakapan:
                 f"Kategori \"{a['kategori_tidak_dikenal']}\" nggak ada di data aku. Kategori yang tersedia: {daftar}. "
                 "Mau cari yang mana?"]))
         catatan += self._terapkan_kategori(a, k)
+        catatan_merek = self._terapkan_merek(a, k)
+        if k["merek"] and a["intent"] == "rekomendasi" and not a["multi"] and all(
+                self._cari(k["profil"], kat, top_n=1, merek=k["merek"]).empty for kat in (k["kategori"] or [None])):
+            # tidak ada produk brand itu yang cocok -> alasannya dirinci (sama dengan tanya kecocokan brand);
+            # profil sudah diterapkan di atas, jadi tidak dinilai ulang dengan tipe/masalah dari pesan
+            koreksi = [c for c in catatan_merek if c.startswith("Aku anggap")]  # tebakan ejaan brand tetap disebut
+            return self._cocok_merek({**a, "merek": k["merek"], "kategori": k["kategori"], "tipe_kulit": None,
+                                      "masalah_kulit": []}, k, catatan + koreksi + self._pengingat_kategori(a, k))
+        catatan += catatan_merek
 
         if a["jumlah_flag"] == "tidak_valid":
             return self._respons(k, "klarifikasi", "\n\n".join(catatan + [
@@ -526,21 +822,270 @@ class Percakapan:
     def _label_kategori(daftar):
         return " & ".join(nlu.LABEL_KATEGORI[x] for x in daftar)
 
-    def _cari(self, p, kategori=None, top_n=UKURAN_POOL, pakai_budget=True, kecuali=()):
+    def _cari(self, p, kategori=None, top_n=UKURAN_POOL, pakai_budget=True, kecuali=(), merek=None):
+        """merek: hanya produk brand itu (filter merek, lihat _terapkan_merek) -- dicari dari seluruh hasil yang
+        relevan, baru dipotong top_n, supaya produk brand itu yang peringkatnya lebih bawah tidak terlewat."""
         hasil = self.cbf.recommend(
             tipe_kulit=p["tipe_kulit"], masalah_kulit=p["masalah_kulit"] or None,
             budget_max=p["budget_max"] if pakai_budget else None,
             budget_min=p["budget_min"] if pakai_budget else None,
-            kategori=kategori, top_n=top_n + len(kecuali), hanya_relevan=True)
-        if kecuali:
+            kategori=kategori, top_n=(1000 if merek else top_n) + len(kecuali), hanya_relevan=True)
+        if merek:
+            hasil = hasil[hasil["id"].isin(self._id_merek(merek))]
+        if kecuali or merek:
             hasil = hasil[~hasil["id"].isin(kecuali)].head(top_n).reset_index(drop=True)
         return hasil
+
+    def _siapkan_merek(self):
+        """Indeks pengenal brand (_cari_merek):
+        - kanonik: ejaan berbeda untuk brand yang sama di data ("hada labo"/"hadalabo", "pond's"/"ponds") digabung,
+          diwakili ejaan dengan produk terbanyak;
+        - alias: nama tanpa "the" ("originote") dan tanpa spasi/tanda ("hadalabo"), kecuali sisanya kata umum;
+        - pendek: brand 2-3 huruf ("omg", "syb", "you") -- hanya dikenali tepat setelah kata merek/brand/produk;
+        - tebak: brand yang boleh dicocokkan dengan salah ketik (saringan sama dengan nlu.cari_merek)."""
+        brand = self.cbf.df["brand"].dropna().astype(str).str.lower().str.strip()
+        self._jumlah_merek = brand.value_counts().to_dict()
+        kelompok = {}
+        for m in self._merek:
+            kelompok.setdefault(re.sub(r"[^a-z0-9]", "", m), []).append(m)
+        self._kanonik = {m: max(g, key=lambda x: (self._jumlah_merek.get(x, 0), x)) for g in kelompok.values() for m in g}
+        umum = nlu._MEREK_UMUM | set(nlu._KATA)
+        self._alias_merek = {}
+        for m in self._merek:
+            for alias in (m[4:] if m.startswith("the ") else None, re.sub(r"[^a-z0-9]", "", m)):
+                if alias and alias != m and len(alias) >= 5 and alias not in umum and alias not in self._merek:
+                    self._alias_merek[alias] = m
+        # pendek / tanpa 3 huruf berurutan ("omg", "sr12", "sk-ii", "i'm"): disaring nlu.cari_merek, jadi dikenali
+        # hanya setelah kata merek/brand/produk; "60gr" (angka + satuan) bukan brand
+        self._merek_pendek = {m for m in self._merek if (len(m) <= 3 or not re.search(r"[a-z]{3}", m))
+                              and re.search(r"[a-z]", m) and not re.fullmatch(r"\d+\s*[a-z]{0,3}", m) and m not in umum}
+        self._merek_tebak = sorted({m for m in self._merek | set(self._alias_merek)
+                                    if len(m) >= 4 and m not in umum and re.search(r"[a-z]{3}", m)})
+
+    def _cari_merek(self, teks):
+        """Brand katalog yang disebut (selalu dikembalikan dalam ejaan kanoniknya):
+        1. persis atau alias ("originote" -> the originote) di mana pun di pesan;
+        2. brand pendek ("omg", "you") hanya tepat setelah kata merek/brand/produk;
+        3. salah ketik tipis ("merek azzarine", "ms gow") yang ditulis setelah kata merek/brand/produk/dari atau
+           menjadi seluruh isi pesan -- di luar posisi itu kata biasa bisa terbaca sebagai brand. Nama 4 huruf hanya
+           ditebak setelah kata merek/brand/produk. Kalau seri, brand dengan produk terbanyak.
+        return: (brand, yang tertulis kalau bukan ejaan persis, atau None)."""
+        persis = nlu.cari_merek(teks, self._merek)
+        if persis:
+            return self._kanonik[persis], None
+        alias = nlu.cari_merek(teks, frozenset(self._alias_merek))
+        if alias:
+            return self._kanonik[self._alias_merek[alias]], alias
+        isyarat = r"\b(?:merek|merk|brand|produk(?:-produk|nya)?)\s+"
+        for m in sorted(self._merek_pendek, key=len, reverse=True):
+            if re.search(isyarat + re.escape(m) + r"(?![a-z0-9])", teks):
+                return self._kanonik[m], None
+        kandidat = []  # (yang tertulis, didahului kata merek/brand/produk?)
+        teks = re.sub(r"(?<=[a-z0-9])['’`-](?=[a-z0-9])", "", teks)  # "l'orel", "kojie-an" -> dibandingkan tanpa tanda
+        for m in re.finditer(r"\b(merek|merk|brand|produk(?:-produk|nya)?|dari)\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,2})", teks):
+            kata = m.group(2).split()
+            kandidat += [(" ".join(kata[:n]), m.group(1) != "dari") for n in range(1, len(kata) + 1)]
+        isi = [t for t in re.findall(r"[a-z0-9]+", teks)
+               if t not in nlu.STOP and t not in _ISYARAT_MEREK and not nlu._PARTIKEL.fullmatch(t)]
+        if 1 <= len(isi) <= 3:
+            kandidat.append((" ".join(isi), False))
+        for kata, berisyarat in kandidat:
+            if len(kata) < (4 if berisyarat else 5) or kata.split()[0] in nlu._KATA or kata.split()[0] in nlu.STOP:
+                continue
+            jarak, _, cocok = min((glosarium._jarak(kata, m), -self._jumlah_merek.get(self._alias_merek.get(m, m), 0), m)
+                                  for m in self._merek_tebak)
+            if jarak <= (1 if max(len(kata), len(cocok)) < 9 else 2) and (len(cocok) >= 5 or berisyarat):
+                return self._kanonik[self._alias_merek.get(cocok, cocok)], kata
+        return None, None
+
+    def _kata_merek(self, merek):
+        """Semua kata yang bisa menuliskan brand itu: ejaan-ejaan di data dan aliasnya ("hada labo", "hadalabo")."""
+        tulisan = [v for v in self._merek if self._kanonik[v] == merek]
+        tulisan += [al for al, v in self._alias_merek.items() if self._kanonik[v] == merek]
+        return {t for v in tulisan for t in [v, *v.split(), *re.findall(r"[a-z0-9]+", v)]}
+
+    def _merek_dibanding(self, teks):
+        """Brand-brand yang dibandingkan ("bandingkan wardah dengan azzarine, bagusan yang mana?", "wardah atau azarine
+        mending mana?"): tiap potongan kalimat hanya boleh berisi nama brand (selain kata tanya, kategori, dan kosakata
+        kulit). Ada potongan yang menyebut produk tertentu / nomor -> perbandingan produk biasa.
+        return: ([(brand, yang tertulis kalau salah ketik)], [nama yang bukan brand katalog]) dengan >= 1 brand dan
+        >= 2 nama semuanya, atau None."""
+        hasil, asing = [], []
+        for potong in _PEMISAH_MEREK.split(teks):
+            kata = [t for t in re.findall(r"[a-z0-9][a-z0-9'&.-]*", potong)
+                    if not any(x in nlu.STOP or x in nlu._KATA_UMUM or x in _ISIAN_NAMA or x in _ISYARAT_MEREK
+                               or x in nlu._KATA_TANYA or x in _KATA_PILIH or x in nlu._KATA
+                               for x in (t, re.sub(r"(nya|ku|mu)$", "", t)))  # "cocoknya" = cocok
+                    and not t.startswith("banding") and not nlu._PARTIKEL.fullmatch(t)]
+            if not kata:
+                continue
+            merek, tertulis = self._cari_merek(" ".join(kata))
+            if not merek and len(kata) == 1 and self._nama_asing({"teks": f"merek {kata[0]}"}):
+                asing.append(kata[0])  # satu kata yang bukan brand katalog maupun kata umum ("vivalavida")
+                continue
+            if not merek or set(kata) - set((tertulis or "").split()) - self._kata_merek(merek):
+                return None  # bukan brand, atau menyebut produk tertentu ("wardah lightening face mist")
+            if merek not in [m for m, _ in hasil]:
+                hasil.append((merek, tertulis))
+        return (hasil, asing) if hasil and len(hasil) + len(asing) >= 2 else None
+
+    def _banding_merek(self, a, k, daftar):
+        """"bandingkan wardah dengan azarine, bagusan mana?" -> perbandingan brand dari data, dinilai untuk kulit
+        pengguna: jumlah produk, yang cocok dengan profil (tipe, masalah, budget), ulasan positif (rata-rata tertimbang
+        jumlah ulasan), rating, harga tengah produk yang cocok, dan produk paling cocok tiap brand (jadi kartu
+        bernomor). Kesimpulan hanya dari angka-angka itu; kalau unggulnya terbelah, disebut untung-ruginya.
+        Profil TIDAK diubah; tipe/masalah/kategori yang disebut di pesan dipakai untuk perbandingan ini saja."""
+        sebut = [s for s in nlu._cari_sebutan(a["teks"]) if not s["dinegasi"]]
+        kategori = list(dict.fromkeys(s["kunci"] for s in sebut if s["jenis"] == "kategori"))
+        p, catatan = dict(k["profil"]), []
+        tipe = next((s["kunci"] for s in sebut if s["jenis"] == "tipe"), None)
+        masalah = list(dict.fromkeys(s["kunci"] for s in sebut if s["jenis"] == "masalah"))
+        if tipe or masalah:
+            p["tipe_kulit"], p["masalah_kulit"] = tipe or p["tipe_kulit"], masalah or p["masalah_kulit"]
+            catatan.append(f"_Aku bandingkan untuk {self._teks_kulit(p).replace('**', '')} (profil kamu nggak aku ubah)._")
+        catatan += [f"Aku anggap yang kamu maksud merek **{self._nama_merek(m)}** (tertulis \"{t}\")." for m, t in daftar
+                    if t]
+        df, data = self.cbf.df, []
+        for merek, _ in daftar[:MAKS_BANDING]:
+            semua = df[df["id"].isin(self._id_merek(merek))]
+            semua = semua[semua["kategori"].isin(kategori)] if kategori else semua
+            cocok = pd.concat([self._cari(p, kat, top_n=1000, merek=merek) for kat in (kategori or [None])]
+                              ).drop_duplicates("id")
+            ul = semua[(semua["jml_ulasan"].fillna(0) > 0) & semua["skor_sentimen"].notna()]
+            n_ul = int(ul["jml_ulasan"].sum())
+            sumber_harga = semua[semua["id"].isin(set(cocok["id"]))] if not cocok.empty else semua
+            harga = sumber_harga.loc[~sumber_harga["harga_outlier"].fillna(False).astype(bool), "harga"].dropna()
+            data.append({"merek": merek, "nama": self._nama_merek(merek), "n": len(semua), "cocok": cocok,
+                         "positif": float((ul["skor_sentimen"] * ul["jml_ulasan"]).sum() / n_ul) if n_ul else None,
+                         "n_ulasan": n_ul, "rating": float(semua["rating"].dropna().mean()) if semua["rating"].notna().any()
+                         else None, "harga": float(harga.median()) if not harga.empty else None})
+        label_kat = self._label_kategori(kategori) if kategori else "produk"
+        if not any(d["n"] for d in data):
+            return self._respons(k, "kosong", "\n\n".join(catatan + [
+                f"Belum ada {label_kat} dari {' maupun '.join(d['nama'] for d in data)} di data aku, jadi belum bisa aku "
+                "bandingkan."]))
+
+        teratas = pd.concat([d["cocok"].head(1) for d in data if not d["cocok"].empty])
+        k["pool"], k["alasan"], k["merek"], k["fokus"] = list(teratas["id"]), {}, None, "tampil"
+        produk, _ = self._susun_produk(teratas, k, a["teks"], otomatis=False) if not teratas.empty else ([], None)
+
+        def terbaik(nilai, cari_min=False):
+            ada = [(v, i) for i, v in enumerate(nilai) if v is not None]
+            if len(ada) < 2:
+                return None
+            pilih = (min if cari_min else max)(ada)[0]
+            juara = [i for v, i in ada if v == pilih]
+            return juara[0] if len(juara) == 1 else None
+
+        n_cocok = [len(d["cocok"]) for d in data]
+        tabel = {"produk": [d["nama"] for d in data], "baris": [
+            {"atribut": f"{label_kat.capitalize()} di data", "nilai": [str(d["n"]) for d in data], "terbaik": None},
+            {"atribut": "Cocok untuk kulitmu", "nilai": [f"{c} ({c / d['n']:.0%})" if d["n"] else "0" for c, d in
+                                                        zip(n_cocok, data)], "terbaik": terbaik(n_cocok)},
+            {"atribut": "Ulasan positif", "nilai": [f"{d['positif'] * 100:.0f}% dari {d['n_ulasan']} ulasan"
+                                                   if d["positif"] is not None else "belum ada ulasan" for d in data],
+             "terbaik": terbaik([d["positif"] for d in data])},
+            {"atribut": "Rating rata-rata", "nilai": [f"★ {d['rating']:.1f}" if d["rating"] is not None
+                                                     else "belum ada rating" for d in data],
+             "terbaik": terbaik([None if d["rating"] is None else round(d["rating"], 1) for d in data])},
+            {"atribut": "Harga tengah produk yang cocok", "nilai": [rupiah(d["harga"]) if d["harga"] is not None
+                                                                   else "tidak ada data" for d in data],
+             "terbaik": terbaik([d["harga"] for d in data], cari_min=True)},
+            {"atribut": "Produk paling cocok", "nilai": [self._label_banding(d["cocok"].iloc[0]["id"], k)
+                                                        if not d["cocok"].empty else "belum ada yang cocok"
+                                                        for d in data], "terbaik": None}]}
+
+        kulit = f"{self._teks_kulit(p)}, budget {teks_budget(p)}"
+        unggul_cocok, unggul_ulasan = terbaik(n_cocok), terbaik([d["positif"] for d in data])
+        nama = [f"**{d['nama']}**" for d in data]
+        if all(c == 0 for c in n_cocok):
+            kesimpulan = (f"Belum ada {label_kat} dari merek-merek ini yang cocok untuk {kulit}, jadi aku belum bisa bilang "
+                          "mana yang lebih pas untukmu.")
+        elif sum(c > 0 for c in n_cocok) == 1:
+            j = next(i for i, c in enumerate(n_cocok) if c > 0)
+            kesimpulan = f"Untuk {kulit}, hanya {nama[j]} yang punya {label_kat} yang cocok ({n_cocok[j]})."
+        elif unggul_cocok is not None and unggul_cocok == unggul_ulasan:
+            j = unggul_cocok
+            lain = max((i for i in range(len(data)) if i != j), key=lambda i: n_cocok[i])
+            persen = lambda x: f"{x * 100:.0f}%" if x is not None else "belum ada ulasan"
+            kesimpulan = (f"Untuk {kulit}, {nama[j]} lebih unggul: lebih banyak {label_kat} yang cocok ({n_cocok[j]} vs "
+                          f"{n_cocok[lain]}) dan ulasannya lebih positif ({persen(data[j]['positif'])} vs "
+                          f"{persen(data[lain]['positif'])}).")
+        else:
+            angka_cocok = " vs ".join(str(c) for c in n_cocok)
+            angka_ulasan = " vs ".join(f"{d['positif'] * 100:.0f}%" if d["positif"] is not None else "-" for d in data)
+            positif = [d["positif"] for d in data if d["positif"] is not None]
+            tipis = len(positif) >= 2 and max(positif) - min(positif) < 0.03
+            bagian = []
+            if unggul_cocok is not None:
+                bagian.append(f"{nama[unggul_cocok]} punya lebih banyak {label_kat} yang cocok untuk kulitmu ({angka_cocok})")
+            if unggul_ulasan is not None:
+                bagian.append(f"{nama[unggul_ulasan]} ulasannya lebih positif ({angka_ulasan}"
+                              + (", selisihnya tipis)" if tipis else ")"))
+            kesimpulan = ("Tergantung prioritasmu: " + ", sedangkan ".join(bagian) + "." if bagian else
+                          "Keduanya mirip dari sisi jumlah produk yang cocok dan ulasan.")
+        teks = catatan + [kesimpulan]
+        termurah = terbaik([d["harga"] for d in data], cari_min=True)
+        if termurah is not None and n_cocok[termurah]:
+            teks.append(f"Dari sisi harga, {label_kat} {nama[termurah]} yang cocok untukmu paling terjangkau (harga tengah "
+                        f"{rupiah(data[termurah]['harga'])}).")
+        if produk:
+            teks.append("Produk paling cocok dari tiap merek ada di kartu di bawah. Mau lihat ulasannya? Bilang misalnya "
+                        "\"review nomor 1 dong\".")
+        teks.append("_Cocok = sesuai tipe kulit, masalah kulit, dan budget kamu. Ulasan positif = rata-rata persentase "
+                    "ulasan positif tiap produk, ditimbang jumlah ulasannya (ulasan Shopee yang dilabeli otomatis)._")
+        return self._respons(k, "perbandingan", "\n\n".join(teks), produk, perbandingan=tabel)
+
+    def _id_merek(self, merek):
+        """Semua produk brand itu, termasuk yang tercatat dengan ejaan lain ("hada labo" & "hadalabo")."""
+        df, kanonik = self.cbf.df, self._kanonik.get(merek, merek)
+        brand = df["brand"].astype(str).str.lower().str.strip()
+        return set(df.loc[brand.map(lambda b: self._kanonik.get(b, b)) == kanonik, "id"])
+
+    def _nama_merek(self, merek):
+        """Ejaan brand seperti di katalog ("wardah" -> "Wardah")."""
+        df = self.cbf.df
+        sama = df["brand"].astype(str).str.lower().str.strip() == self._kanonik.get(merek, merek)
+        return df.loc[sama, "brand"].mode().iat[0] if sama.any() else merek.title()
+
+    def _terapkan_merek(self, a, k):
+        """Filter merek: berlaku untuk permintaan rekomendasi yang menyebut brand katalog ("produk wardah apa aja?",
+        "ada sunscreen azarine ga?") dan lanjutannya ("yang lain dong", "kasih 10", "yang lebih murah"); permintaan
+        rekomendasi baru tanpa brand = semua brand lagi. return: list kalimat penanda filter."""
+        merek, tertulis = self._cari_merek(a["teks"])
+        dikecualikan = None
+        if merek and re.search(rf"\b(selain|bukan|jangan|kecuali|tanpa|anti|(ga|gak|nggak|ngga|tidak) mau)\s+"
+                               rf"(produk\s+|brand\s+|merek\s+|merk\s+|yang\s+)?{re.escape(tertulis or merek)}\b",
+                               a["teks"]):
+            dikecualikan, merek = merek, None  # "serum selain wardah" bukan filter KE wardah
+        if a["intent"] == "rekomendasi" or (merek and a["intent"] in ("alternatif", "lebih_murah")):
+            k["merek"] = merek
+        if dikecualikan and a["intent"] in _KELUARGA_REKOMENDASI:  # mengecualikan brand belum didukung -> terus terang
+            return [f"Aku belum bisa mengecualikan merek tertentu, jadi hasilnya dari semua merek (produk "
+                    f"**{self._nama_merek(dikecualikan)}** bisa saja ikut muncul)."]
+        if not k["merek"] or a["intent"] not in _KELUARGA_REKOMENDASI:
+            return []
+        nama = self._nama_merek(k["merek"])
+        if not merek:
+            return [f"_(Masih produk **{nama}** saja. Minta lagi tanpa menyebut merek kalau mau dari semua merek.)_"]
+        # salah ketik nama brand -> disebut terus terang, bukan diam-diam dikoreksi
+        koreksi = [f"Aku anggap yang kamu maksud merek **{nama}** (tertulis \"{tertulis}\")."] if tertulis else []
+        if a["intent"] != "rekomendasi":
+            return koreksi + [f"Aku carikan dari produk **{nama}** saja."]
+        p, kategori = k["profil"], k["kategori"]
+        n_merek = len(self._id_merek(k["merek"]) & set(self.cbf.df.loc[self.cbf.df["kategori"].isin(kategori), "id"])
+                      if kategori else self._id_merek(k["merek"]))
+        n_cocok = len(pd.concat([self._cari(p, kat, top_n=1000, merek=k["merek"]) for kat in (kategori or [None])])
+                      .drop_duplicates("id"))
+        label = f"{self._label_kategori(kategori)} {nama}" if kategori else f"produk {nama}"
+        return koreksi + [f"Dari {n_merek} {label} di data aku, **{n_cocok}** cocok untuk {self._teks_kulit(p)}, budget "
+                          f"{teks_budget(p)}. Aku carikan dari produk **{nama}** saja."]
 
     def _semua_sudah_tampil(self, k, kategori, catatan):
         """"yang lain dong" tapi semua produk yang cocok sudah pernah tampil."""
         p = k["profil"]
         label = nlu.LABEL_KATEGORI[kategori] if kategori else "produk"
-        n = len(self._cari(p, kategori, top_n=1000))
+        n = len(self._cari(p, kategori, top_n=1000, merek=k["merek"]))
         if not n:
             return self._tanpa_hasil(k, kategori, catatan, TOP_N_DEFAULT)
         # daftar terakhir tetap diingat: "yang lain lagi" berikutnya dapat
@@ -557,7 +1102,7 @@ class Percakapan:
         p = k["profil"]
         kategori = k["kategori"][0] if k["kategori"] else None
         diminta = diminta or a["jumlah"] or TOP_N_DEFAULT
-        pool = self._cari(p, kategori, kecuali=kecuali)
+        pool = self._cari(p, kategori, kecuali=kecuali, merek=k["merek"])
         if pool.empty:
             if kecuali:
                 return self._semua_sudah_tampil(k, kategori, catatan)
@@ -605,7 +1150,7 @@ class Percakapan:
         bagian, catatan_grup = [], []
         for kat in k["kategori"]:
             diminta = jumlah_per.get(kat) or a["jumlah"] or (ikut_tampil and tampil_per.get(kat)) or TOP_N_DEFAULT
-            df = self._cari(p, kat, kecuali=kecuali).head(diminta)
+            df = self._cari(p, kat, kecuali=kecuali, merek=k["merek"]).head(diminta)
             label = nlu.LABEL_KATEGORI[kat]
             if df.empty and kecuali:
                 catatan_grup.append(f"Semua **{label}** yang cocok sudah aku tampilkan, nggak ada pilihan lain lagi.")
@@ -745,10 +1290,12 @@ class Percakapan:
         k["pool"], k["tampil"], k["alasan"] = [], [], {}
         label = nlu.LABEL_KATEGORI[kategori] if kategori else "produk"
         ada_budget = bool(p["budget_max"] or p["budget_min"])
-        luar = self._cari(p, kategori, top_n=1000, pakai_budget=False) if ada_budget else pd.DataFrame()
+        luar = self._cari(p, kategori, top_n=1000, pakai_budget=False, merek=k["merek"]) if ada_budget \
+            else pd.DataFrame()
         luar = luar[luar["harga"].notna()] if not luar.empty else luar
-        n_kategori = len(self._cari(p, None, top_n=1000)) if kategori else 0
-        n_keduanya = len(self._cari(p, None, top_n=1000, pakai_budget=False)) if kategori and ada_budget else 0
+        n_kategori = len(self._cari(p, None, top_n=1000, merek=k["merek"])) if kategori else 0
+        n_keduanya = len(self._cari(p, None, top_n=1000, pakai_budget=False, merek=k["merek"])) \
+            if kategori and ada_budget else 0
 
         opsi, alternatif = [], None
         if not luar.empty and p["budget_max"]:
@@ -836,6 +1383,8 @@ class Percakapan:
             "- **Bandingkan & pilih:** \"bandingkan nomor 1 sama 2\", \"yang bagusan mana?\"",
             "- **Ulasan asli pembeli:** \"review nomor 1 dong\", \"keluhan orang soal nomor 2 apa?\"",
             "- **Pilihan lain:** \"yang lain dong\", \"ada yang lebih murah?\", \"urutin dari yang termurah\"",
+            "- **Rutinitas & rencana:** \"buatkan rutinitas skincare pagi malam\", \"plan skincare 1 bulan\"",
+            "- **Bahan & skincare umum:** \"niacinamide itu buat apa?\", \"cara pakai sunscreen yang benar?\"",
             "",
             "Aku bukan pengganti dokter kulit ya. Untuk obat resep atau kondisi kulit yang parah, konsultasi ke "
             "dermatologis."]))
@@ -845,6 +1394,23 @@ class Percakapan:
         dijawab langsung dari data (tidak pernah mengarang). Profil TIDAK
         diubah; kalau pertanyaannya menyebut tipe/masalah kulit lain ("cocok ga
         buat kulit sensitif?"), produknya dinilai terhadap itu."""
+        if a["atribut"] == "kecocokan" and not a.get("merek") and not a["rujukan"]["nomor"]:
+            # "cocok ga wardah buat aku" = sama dengan "apakah aku cocok dengan produk wardah?" (pola brand di nlu
+            # hanya menangkap "produk X" / "X cocok" / "cocok dengan X")
+            merek = self._cari_merek(a["teks"])[0]
+            if merek and not any(self._cari_nama(n)["status"] == "ketemu" for n in a["rujukan"]["nama"]):
+                a = {**a, "merek": merek}
+        if a["atribut"] == "kecocokan" and a.get("merek") and not a["rujukan"]["nomor"]:
+            # yang disebut hanya brand ("apakah aku cocok dengan wardah?") atau produk brand itu yang
+            # tidak ada di data -> seluruh produk brand itu dinilai
+            hasil_nama = {n: self._cari_nama(n) for n in a["rujukan"]["nama"]}
+            if not any(h["status"] == "ketemu" for h in hasil_nama.values()):
+                # nama yang memuat kata khas selain brand/kata tanya/kosakata kulit ("skintific 5x xyz")
+                bukan_brand = [n for n, h in hasil_nama.items() if h["status"] == "tidak_ketemu"
+                               and set(n.split()) - set(a["merek"].split()) - _ISIAN_NAMA - nlu._KATA_TANYA
+                               - nlu.STOP - set(nlu._KATA)]
+                catatan = [f"Produk \"{n}\" nggak ada di data aku, jadi nggak bisa aku nilai langsung." for n in bukan_brand]
+                return self._cocok_merek(a, k, catatan)
         ids, masalah = self._target_produk(a, k)
         if not ids:
             if not masalah:
@@ -852,6 +1418,9 @@ class Percakapan:
                                "\"harga wardah lightening face mist berapa?\".")
             return self._respons(k, "klarifikasi", "\n\n".join(masalah))
         teks = list(masalah)
+        if a.get("cara_pakai"):
+            teks.append("Cara pakai tiap produk bisa beda, jadi ikuti petunjuk di kemasan atau halaman produknya. Ini "
+                        "info produknya dari data aku:")
         if len(ids) > MAKS_JELASKAN:
             teks.append(f"Aku tampilkan {MAKS_JELASKAN} produk pertama dulu ya.")
             ids = ids[:MAKS_JELASKAN]
@@ -865,9 +1434,358 @@ class Percakapan:
         bagian = {"harga": ("harga",), "kandungan": ("kandungan",), "rating": ("ulasan",), "sentimen": ("ulasan",),
                   "kecocokan": ("tipe", "masalah")}.get(a["atribut"], ("kategori", "harga", "ulasan", "tipe", "masalah",
                                                                         "kandungan"))
-        for _, row in self.cbf.bandingkan_produk(ids).iterrows():
+        df = self.cbf.bandingkan_produk(ids)
+        if a["atribut"] == "kecocokan":  # jawaban langsung dulu, baru rinciannya
+            status = [self._status_cocok(row, p) for _, row in df.iterrows()]
+            if len(status) == 1:
+                teks.append(f"{status[0][1]} Rinciannya:")
+            else:
+                hitung = {s: sum(x[0] == s for x in status) for s in ("cocok", "sebagian", "kurang", "belum_pasti")}
+                ringkas = [f"{n} {teks}" for n, teks in (
+                    (hitung["cocok"], "cocok"),
+                    (hitung["sebagian"], "cocok untuk tipe kulitmu tapi tidak menangani masalah kulitmu"),
+                    (hitung["kurang"], "kurang cocok"), (hitung["belum_pasti"], "belum bisa dipastikan")) if n]
+                teks.append(f"Dari {len(status)} produk ini untuk {self._teks_kulit(p)}: {', '.join(ringkas)}. "
+                            "Rinciannya:")
+        for _, row in df.iterrows():
             teks.append(self._rincian_alasan(row, k, p, bagian))
         return self._respons(k, "info_produk", "\n\n".join(teks))
+
+    @staticmethod
+    def _teks_kulit(p):
+        masalah = ", ".join(nlu.LABEL_MASALAH[m] for m in p["masalah_kulit"])
+        return f"kulit **{p['tipe_kulit']}**" + (f" dengan masalah **{masalah}**" if masalah else "")
+
+    def _status_cocok(self, row, p):
+        """Jawaban langsung "cocok ga buat kulitku?" dari tag produk vs profil penilai.
+        return: (status, kalimat), status 'cocok' | 'sebagian' | 'kurang' | 'belum_pasti'."""
+        tipe_tag, masalah_tag = _tag(row["tipe_kulit_cocok"]), _tag(row["masalah_kulit_cocok"])
+        tipe_ok = (p["tipe_kulit"] in tipe_tag) if (tipe_tag and p["tipe_kulit"]) else None
+        masalah_ok = bool(set(p["masalah_kulit"]) & set(masalah_tag)) if (p["masalah_kulit"] and masalah_tag) else None
+        masalah = ", ".join(nlu.LABEL_MASALAH[m] for m in p["masalah_kulit"])
+        if tipe_ok is False:
+            return "kurang", (f"**Kurang cocok**: produk ini tidak ditandai untuk kulit **{p['tipe_kulit']}**"
+                              + (f", walau menangani **{masalah}**." if masalah_ok else "."))
+        if tipe_ok and masalah_ok is False:
+            return "sebagian", (f"**Cocok untuk kulit {p['tipe_kulit']}**, tapi tidak menangani masalah "
+                                f"**{masalah}** kamu.")
+        if tipe_ok and (masalah_ok or not p["masalah_kulit"]):
+            return "cocok", f"**Cocok** untuk {self._teks_kulit(p)} kamu, menurut data produk ini."
+        if masalah_ok is False:
+            return "kurang", (f"**Kurang cocok**: produk ini tidak menangani masalah **{masalah}** kamu (data tipe "
+                              "kulitnya juga belum ada).")
+        return "belum_pasti", "**Belum bisa dipastikan**, karena data kecocokan produk ini belum lengkap."
+
+    def _cocok_merek(self, a, k, catatan):
+        """"apakah aku cocok dengan wardah?" -> semua produk brand itu (di kategori yang disebut, kalau
+        ada) dinilai terhadap profil. Yang cocok ditampilkan sebagai kartu (urut skor CBF), sisanya
+        diringkas alasannya. Profil tidak diubah."""
+        merek, p, catatan = self._kanonik.get(a["merek"], a["merek"]), dict(k["profil"]), list(catatan)
+        if a["tipe_kulit"] or a["masalah_kulit"]:
+            p["tipe_kulit"] = a["tipe_kulit"] or p["tipe_kulit"]
+            p["masalah_kulit"] = a["masalah_kulit"] or p["masalah_kulit"]
+            catatan.append(f"_Aku nilai untuk {self._teks_kulit(p).replace('**', '')} (profil kamu nggak aku ubah)._")
+        df = self.cbf.df
+        sama = df["id"].isin(self._id_merek(merek))  # termasuk ejaan lain brand yang sama di data
+        nama_merek = self._nama_merek(merek)
+        produk_merek = df[sama & df["kategori"].isin(a["kategori"])] if a["kategori"] else df[sama]
+        label = f"{self._label_kategori(a['kategori'])} {nama_merek}" if a["kategori"] else f"produk {nama_merek}"
+        kategori_lain = self._label_kategori(a["kategori"]) if a["kategori"] else "produk"
+        if produk_merek.empty:
+            return self._respons(k, "kosong", "\n\n".join(catatan + [
+                f"Belum ada {label} di data aku, jadi kecocokannya belum bisa aku nilai. Mau aku carikan "
+                f"{kategori_lain} dari brand lain yang cocok untuk kulitmu?"]))
+
+        cocok = pd.concat([self._cari(p, kat, top_n=1000) for kat in (a["kategori"] or [None])])
+        cocok = cocok[cocok["id"].isin(set(produk_merek["id"]))].drop_duplicates("id").reset_index(drop=True)
+        alasan = {"tipe": 0, "masalah": 0, "budget": 0, "lain": 0}
+        for _, row in produk_merek[~produk_merek["id"].isin(set(cocok["id"]))].iterrows():
+            tipe_tag, masalah_tag = _tag(row["tipe_kulit_cocok"]), _tag(row["masalah_kulit_cocok"])
+            harga = None if _kosong(row["harga"]) or row["harga_outlier"] else row["harga"]
+            if tipe_tag and p["tipe_kulit"] and p["tipe_kulit"] not in tipe_tag:
+                alasan["tipe"] += 1
+            elif masalah_tag and p["masalah_kulit"] and not set(p["masalah_kulit"]) & set(masalah_tag):
+                alasan["masalah"] += 1
+            elif (p["budget_max"] and (harga is None or harga > p["budget_max"])) \
+                    or (p["budget_min"] and (harga is None or harga < p["budget_min"])):
+                alasan["budget"] += 1
+            else:
+                alasan["lain"] += 1
+        rincian = [teks for jumlah, teks in (
+            (alasan["tipe"], f"{alasan['tipe']} tidak ditandai untuk kulit {p['tipe_kulit']}"),
+            (alasan["masalah"], f"{alasan['masalah']} tidak menangani masalah kulit kamu"),
+            (alasan["budget"], f"{alasan['budget']} di luar budget {teks_budget(p)}"),
+            (alasan["lain"], f"{alasan['lain']} datanya belum cukup untuk dinilai")) if jumlah]
+        n, kulit = len(produk_merek), self._teks_kulit(p)
+
+        if cocok.empty:
+            k["merek"] = None  # yang ditawarkan berikutnya justru brand lain
+            return self._respons(k, "kosong", "\n\n".join(catatan + [
+                f"**Belum ada yang cocok.** Dari {n} {label} di data aku, belum ada yang cocok untuk {kulit} "
+                f"dengan budget {teks_budget(p)}" + (f": {', '.join(rincian)}." if rincian else "."),
+                f"Mau aku carikan {kategori_lain} dari brand lain yang cocok? Bilang aja "
+                f"\"rekomendasiin {kategori_lain}\"."]))
+        k["pool"], k["alasan"], k["merek"] = list(cocok["id"]), {}, merek  # lanjutan ("yang lain dong") tetap brand ini
+        tampil = cocok.head(a["jumlah"] or TOP_N_DEFAULT)
+        produk, _ = self._susun_produk(tampil, k, a["teks"], otomatis=False)
+        teks = [f"**Ada yang cocok.** Dari {n} {label} di data aku, **{len(cocok)}** cocok untuk {kulit} dan masuk "
+                f"budget {teks_budget(p)}." + (f" Ini {len(tampil)} yang paling cocok:" if len(cocok) > len(tampil)
+                                                else "")]
+        if rincian:
+            teks.append(f"Sisanya kurang cocok: {', '.join(rincian)}.")
+        return self._respons(k, "rekomendasi", "\n\n".join(catatan + teks), produk)
+
+    def _bahan_umum(self, a, k):
+        """"aman ga pakai produk yang ada alkoholnya?" tanpa produk tertentu -> dijawab terus terang:
+        kecocokan dinilai dari data tiap produk, bukan dari pengetahuan umum soal bahan."""
+        return self._respons(k, "klarifikasi",
+                             f"Aku belum bisa menjawab aman atau nggaknya **{a['bahan']}** secara umum. Aku menilai "
+                             "kecocokan dari data tiap produk (tipe kulit, masalah kulit, dan kandungan yang "
+                             "tercatat), bukan dari pengetahuan umum soal bahan, supaya nggak mengarang. Kalau kamu "
+                             "punya produk tertentu, sebut namanya, nanti aku cek kecocokannya dengan kulit kamu. "
+                             "Atau minta rekomendasi, misalnya \"rekomendasiin moisturizer buat kulit kering\".")
+
+    # ---------- bahan, rutinitas, obrolan umum ----------
+
+    def _info_bahan(self, a, k):
+        """"niacinamide itu buat apa?" / "bedanya aha sama bha" -> dijawab dari glosarium (isi terkurasi, bukan
+        LLM). Untuk satu bahan, produk katalog yang mengandung bahan itu dan cocok dengan profil ikut
+        ditampilkan. Profil TIDAK diubah; tipe/masalah yang disebut ("cocok buat kulit berminyak?") dipakai
+        untuk memilih produknya saja."""
+        entri = [glosarium.per_kunci(x) for x in a["bahan"]][:3]
+        p = dict(k["profil"])
+        if a["tipe_kulit"] or a["masalah_kulit"]:
+            p["tipe_kulit"] = a["tipe_kulit"] or p["tipe_kulit"]
+            p["masalah_kulit"] = a["masalah_kulit"] or p["masalah_kulit"]
+        teks = []
+        if a.get("bahan_tebakan"):  # salah ketik nama bahan -> disebut terus terang, bukan diam-diam dikoreksi
+            teks.append("Aku anggap yang kamu maksud " + ", ".join(f"**{alias}** (tertulis \"{kata}\")"
+                                                                  for kata, alias in a["bahan_tebakan"]) + ".")
+        if re.search(r"\b(aman|cocok|bahaya|berbahaya|boleh)\w*", a["teks"]):
+            teks.append("Cocok atau amannya suatu bahan beda-beda tiap orang dan tergantung produknya, jadi aku nggak "
+                        "bisa memastikannya. Ini info umumnya:")
+        for e in entri:
+            baris = [f"**{e['nama']}**", f"- **Fungsi:** {e['fungsi']}", f"- **Perlu diperhatikan:** {e['perhatian']}"]
+            if e["masalah"]:
+                baris.append("- **Umumnya dipakai untuk:** " + ", ".join(nlu.LABEL_MASALAH[m] for m in e["masalah"]))
+            if e["rujukan"]:  # supaya pengguna bisa mengecek sendiri sumbernya
+                baris.append("- **Sumber:** " + ", ".join(f"[{label}]({url})" for label, url in e["rujukan"]))
+            teks.append("\n".join(baris))
+        if len(entri) > 1:
+            teks += ["Mau lihat produk yang mengandung salah satunya? Tanya satu bahan, misalnya "
+                     f"\"{entri[0]['alias'][0]} itu buat apa?\", nanti aku tampilkan produknya dari katalog.",
+                     glosarium.CATATAN_UMUM]
+            return self._respons(k, "info_bahan", "\n\n".join(teks))
+
+        e, produk = entri[0], None
+        nama = e["nama"].split(" (")[0]
+        irisan = [nlu.LABEL_MASALAH[m] for m in p["masalah_kulit"] if m in e["masalah"]]
+        if irisan:
+            teks.append(f"Bahan ini umumnya dipakai untuk {', '.join(irisan)}, jadi nyambung dengan masalah kulit kamu.")
+        if p["tipe_kulit"] == "sensitif":
+            teks.append("Karena kulitmu sensitif, uji tempel dulu di area kecil sebelum memakainya rutin.")
+        if e["kunci"] in _BAHAN_DIHINDARI:
+            teks.append(f"Kalau mau menghindari {nama.lower()}, cek daftar kandungan di kemasan atau halaman produknya. "
+                        "Data kandungan di katalog aku belum lengkap untuk semua produk, jadi aku belum bisa menjamin "
+                        f"suatu produk bebas {nama.lower()}.")
+        elif p["tipe_kulit"] or p["masalah_kulit"]:
+            ids = {i for i, b in self._bahan_produk.items() if e["kunci"] in b}
+            cocok = self._cari(p, top_n=1000)
+            cocok = cocok[cocok["id"].isin(ids)]
+            if cocok.empty:
+                teks.append(f"Belum ada produk di katalog aku yang tercatat mengandung {nama} dan cocok untuk "
+                            f"{self._teks_kulit(p)}, budget {teks_budget(p)}. Data kandungan belum lengkap untuk "
+                            "semua produk, jadi bisa saja ada yang terlewat.")
+            else:
+                tampil = cocok.head(TOP_N_DEFAULT)
+                k["alasan"] = {}
+                produk, _ = self._susun_produk(tampil, k, a["teks"], otomatis=False)
+                k["pool"] = list(cocok["id"])[:UKURAN_POOL]
+                teks.append(f"Di katalog aku ada **{len(cocok)}** produk yang mengandung {nama} dan cocok untuk "
+                            f"{self._teks_kulit(p)}, budget {teks_budget(p)}."
+                            + (f" Ini {len(tampil)} yang paling cocok:" if len(cocok) > len(tampil) else ""))
+        teks.append(glosarium.CATATAN_UMUM)
+        return self._respons(k, "info_bahan", "\n\n".join(teks), produk)
+
+    def _saran_bahan(self, a, k):
+        """"kandungan apa yang cocok buat kulitku?" -> bahan di glosarium yang umumnya dipakai untuk masalah kulit
+        pengguna (dari profil, atau yang disebut di pesan -- profil TIDAK diubah). Isi terkurasi, bukan LLM."""
+        p = dict(k["profil"])
+        if a["tipe_kulit"] or a["masalah_kulit"]:
+            p["tipe_kulit"] = a["tipe_kulit"] or p["tipe_kulit"]
+            p["masalah_kulit"] = a["masalah_kulit"] or p["masalah_kulit"]
+        daftar = [(m, [e for e in glosarium.GLOSARIUM if m in e["masalah"]]) for m in p["masalah_kulit"]]
+        daftar = [(m, entri) for m, entri in daftar if entri]
+        if not daftar:
+            return self._respons(k, "info_bahan", "Ceritain dulu masalah kulit kamu (misalnya jerawat, kusam, atau kulit "
+                                                  "kering), nanti aku sebutkan bahan yang umumnya dipakai untuk itu.")
+        teks = [f"Untuk {self._teks_kulit(p)}, ini bahan yang umumnya dipakai menurut glosarium aku:",
+                "\n".join(f"- **{nlu.LABEL_MASALAH[m].capitalize()}:** " + ", ".join(e["nama"] for e in entri)
+                          for m, entri in daftar),
+                "Cocok atau tidaknya tetap beda-beda tiap orang dan tergantung produknya. Mau tahu fungsinya, hal yang "
+                "perlu diperhatikan, sumbernya, dan produk yang mengandungnya di katalog? Tanya satu bahan, misalnya "
+                f"\"{daftar[0][1][0]['alias'][0]} itu buat apa?\"."]
+        if p["tipe_kulit"] == "sensitif":
+            teks.append("Karena kulitmu sensitif, kenalkan satu bahan baru dalam satu waktu dan uji tempel dulu.")
+        teks.append(glosarium.CATATAN_UMUM)
+        return self._respons(k, "info_bahan", "\n\n".join(teks))
+
+    def _rutinitas(self, a, k, pesan, catatan):
+        """"buatkan rutinitas skincare" / "plan skincare 1 bulan" -> satu produk per langkah (dipilih CBF dari
+        katalog dengan budget per produk), urutan pagi & malam, perkiraan total harga, dan jadwal pengenalan
+        4 minggu kalau yang diminta rencana. Filter kategori sticky tidak dipakai dan tidak diubah."""
+        p = k["profil"]
+        if not p["tipe_kulit"] and not p["masalah_kulit"]:
+            return self._respons(k, "klarifikasi", "\n\n".join(catatan + [
+                f"Biar rutinitasnya pas, kasih tahu dulu tipe kulit kamu: {PILIHAN_TIPE}?"]))
+        langkah = [(kat, kapan) for kat, kapan in LANGKAH_RUTIN if kat != "serum" or p["masalah_kulit"]]
+        pilihan, luar, kosong = [], [], []
+        for kat, kapan in langkah:
+            df = self._cari(p, kat, top_n=5)
+            if df.empty and (p["budget_max"] or p["budget_min"]):
+                df = self._cari(p, kat, top_n=5, pakai_budget=False)
+                if not df.empty:
+                    luar.append(kat)
+            if df.empty:
+                kosong.append(nlu.LABEL_KATEGORI[kat])
+                continue
+            # langkah yang dipakai pagi juga: krim malam ("night cream") hanya dipilih kalau tidak ada yang lain
+            siang = df[~df["nama_produk"].str.contains(r"\b(?:night|malam)\b", case=False, regex=True)]
+            if "pagi" in kapan and not siang.empty:
+                df = siang
+            elif "pagi" in kapan:
+                kapan = "malam"
+            pilihan.append((kat, kapan, df.head(1)))
+        if not pilihan:
+            return self._respons(k, "kosong", "\n\n".join(catatan + [
+                f"Aku belum bisa menyusun rutinitas: nggak ada produk di katalog yang cocok untuk {self._teks_kulit(p)}. "
+                "Coba ganti tipe atau masalah kulitnya."]))
+
+        k["alasan"] = {}
+        produk, _ = self._susun_produk(pd.concat([df for _, _, df in pilihan], ignore_index=True), k, pesan,
+                                       otomatis=False)
+        k["pool"] = list(k["tampil"])
+        for x in produk:
+            x["di_luar_budget"] = x["kategori"] in luar
+        grup = [{"judul": f"Langkah {i}: {nlu.LABEL_KATEGORI[kat].capitalize()} ({kapan})", "produk": [x]}
+                for i, ((kat, kapan, _), x) in enumerate(zip(pilihan, produk), 1)]
+        ada = {kat for kat, _, _ in pilihan}
+
+        def urutan(daftar):
+            return " → ".join(nlu.LABEL_KATEGORI[x] + (" (opsional)" if x == "toner" else "") for x in daftar if x in ada)
+
+        teks = catatan + [f"Ini rutinitas skincare untuk {self._teks_kulit(p)}, satu produk per langkah dari katalog "
+                          f"aku (budget {teks_budget(p)} berlaku per produk).",
+                          f"**Pagi:** {urutan(['facial_wash', 'toner', 'moisturizer', 'sunscreen'])}\n\n"
+                          f"**Malam:** {urutan(['facial_wash', 'toner', 'serum', 'moisturizer'])}"]
+        aktif = []
+        if "serum" in ada:
+            id_serum = next(x["id"] for x in produk if x["kategori"] == "serum")
+            aktif = [glosarium.per_kunci(b)["nama"].split(" (")[0] for b in _BAHAN_KERAS
+                     if b in self._bahan_produk.get(id_serum, ())]
+            if aktif:
+                teks.append(f"Serumnya mengandung {' dan '.join(aktif)}, jadi pakai malam saja, mulai 2–3 kali "
+                            "seminggu, jangan dibarengi eksfolian lain, dan wajib sunscreen paginya.")
+        else:
+            teks.append("Kamu belum mencatat masalah kulit khusus, jadi serum aku lewati. Rutinitas dasar cukup "
+                        "membersihkan, melembapkan, dan melindungi dari matahari.")
+        if luar:
+            teks.append(f"{self._label_kategori(luar).capitalize()} yang cocok semuanya di atas budget kamu, jadi yang "
+                        "aku tampilkan **di luar budget**.")
+        if kosong:
+            teks.append(f"Nggak ketemu {' & '.join(kosong)} yang cocok dengan profil kamu, jadi langkah itu aku lewati.")
+
+        harga = {x["kategori"]: x["harga"] for x in produk if x["harga"] is not None}
+        if harga:
+            total = sum(harga.values())
+            tanpa_toner = f" ({rupiah(total - harga['toner'])} tanpa toner)" if "toner" in harga and len(harga) > 1 else ""
+            teks.append(f"**Perkiraan total:** {rupiah(total)}{tanpa_toner}. Ini harga per kemasan di data Shopee, "
+                        "bukan biaya per bulan." + (f" {len(produk) - len(harga)} produk belum ada data harganya."
+                                                   if len(harga) < len(produk) else ""))
+        if a["rencana"]:
+            teks.append(self._jadwal_rutin(ada, aktif))
+        else:
+            teks.append("Mau jadwal mulai pakainya per minggu? Bilang aja \"buatkan plan 1 bulan\".")
+        teks.append(CATATAN_RUTIN)
+        return self._respons(k, "rutinitas", "\n\n".join(teks), produk, grup)
+
+    @staticmethod
+    def _jadwal_rutin(ada, aktif):
+        """Jadwal 4 minggu: produk baru dikenalkan satu per satu supaya reaksi kulit ketahuan penyebabnya."""
+        label = nlu.LABEL_KATEGORI
+        dasar = [label[x] for x in ("facial_wash", "moisturizer", "sunscreen") if x in ada]
+        baru = [label[x] for x in ("toner", "serum") if x in ada]
+        minggu = [f"- **Minggu 1:** pakai {', '.join(dasar)} setiap hari (sunscreen pagi saja) supaya kulit beradaptasi."
+                  + (f" Sambil itu, uji tempel {' dan '.join(baru)} di area kecil (misalnya rahang) beberapa hari."
+                     if baru else "")]
+        minggu.append("- **Minggu 2:** tambahkan toner kalau uji tempelnya aman (tidak merah, gatal, atau perih)."
+                      if "toner" in ada else "- **Minggu 2:** lanjutkan rutinitas dasar dengan konsisten.")
+        if "serum" in ada:
+            minggu.append("- **Minggu 3:** mulai serum malam hari, 2–3 kali seminggu dulu"
+                          + (f" (mengandung {' dan '.join(aktif)})" if aktif else "") + ".")
+            minggu.append("- **Minggu 4:** kalau kulit baik-baik saja, serum boleh dipakai sesuai petunjuk kemasan. "
+                          "Evaluasi: lanjutkan yang cocok, hentikan yang bikin iritasi.")
+        else:
+            minggu.append("- **Minggu 3–4:** lanjutkan dengan konsisten, lalu evaluasi: lanjutkan yang cocok, hentikan "
+                          "yang bikin iritasi.")
+        return ("**Jadwal 4 minggu** (produk baru dikenalkan satu per satu, supaya kalau ada reaksi ketahuan "
+                "penyebabnya):\n\n" + "\n".join(minggu))
+
+    def _obrolan(self, a, k, pesan):
+        """Pertanyaan pengetahuan umum skincare ("cara pakai sunscreen yang benar?") -> dijawab LLM dengan batasan
+        ketat (tanpa merek/produk, tanpa diagnosis/obat, berpegang pada glosarium bila ada bahan yang disebut),
+        diperiksa lagi, lalu ditutup pengingat tetap untuk mengecek dulu. Tanpa LLM -> glosarium kalau ada,
+        selain itu bilang terus terang. Profil & daftar produk TIDAK diubah."""
+        fakta =[glosarium.per_kunci(x) for x in glosarium.semua(a["teks"])][:3]
+        # profil hanya ikut kalau yang ditanya kulit pengguna sendiri, supaya "kenapa kulit berminyak gampang
+        # jerawatan?" tidak dijawab "walaupun kulitmu kering..."
+        diri = re.search(rf"\b{nlu._DIRI}\b|\w+ku\b", a["teks"])
+        jawaban = self.generator.ngobrol(pesan, k["profil"] if diri else None, fakta) if self.generator else None
+        ditolak = False
+        if jawaban:
+            # "acnes" juga nama bakteri jerawat (C. acnes), bukan hanya brand
+            merek = nlu.cari_merek(nlu.normalisasi(jawaban), (self._merek | _MEREK_TERKENAL) - {"acnes"})
+            bersih = None if merek else self._buang_kalimat_berangka(jawaban)
+            if not bersih:
+                print(f"[percakapan] jawaban obrolan dibuang: "
+                      f"{f'menyebut merek {merek}' if merek else 'sebagian besar memuat angka persen/dosis/tautan'}")
+                ditolak = True
+            elif bersih != jawaban:
+                print("[percakapan] kalimat obrolan yang memuat angka persen/dosis/tautan dibuang")
+            jawaban = bersih
+        if not jawaban:
+            if fakta:
+                return self._info_bahan({**a, "bahan": [e["kunci"] for e in fakta]}, k)
+            bisa = ("Yang tetap bisa: rekomendasi produk, info dan ulasan produk, rutinitas skincare, dan penjelasan "
+                    "bahan aktif (misalnya \"niacinamide itu buat apa?\").")
+            return self._respons(k, "klarifikasi", (
+                "Aku belum bisa menjawab pertanyaan itu dengan cukup yakin, jadi lebih baik nggak aku tebak. "
+                if ditolak else "Maaf, penjelasan AI lagi nggak tersedia, jadi pertanyaan umum seperti ini belum bisa "
+                "aku jawab sekarang. ") + bisa)
+        if len(jawaban) > MAKS_OBROLAN:
+            potong = jawaban[:MAKS_OBROLAN]
+            jawaban = potong[:max(potong.rfind(". "), potong.rfind("\n")) + 1] or potong
+        teks = [jawaban]
+        if a["kategori"]:
+            label = nlu.LABEL_KATEGORI[a["kategori"][0]]
+            teks.append(f"Kalau mau, aku bisa carikan {label} yang cocok buat kulit kamu dari katalog. Bilang aja "
+                        f"\"rekomendasiin {label}\".")
+        teks.append(CATATAN_OBROLAN)
+        return self._respons(k, "obrolan", "\n\n".join(teks))
+
+    @staticmethod
+    def _buang_kalimat_berangka(teks):
+        """Kalimat jawaban obrolan yang memuat angka persen, dosis, atau tautan dibuang (angka seperti itu tidak
+        boleh dikarang LLM). return: teks sisanya, atau None kalau yang tersisa tinggal sedikit."""
+        baris = []
+        for b in teks.splitlines():
+            if _POLA_LANGGAR_OBROLAN.search(b):
+                b = " ".join(s for s in re.split(r"(?<=[.!?])\s+", b) if not _POLA_LANGGAR_OBROLAN.search(s))
+                if not re.search(r"[a-zA-Z]{3}", b):
+                    continue
+            baris.append(b)
+        sisa = re.sub(r"\n{3,}", "\n\n", "\n".join(baris)).strip()
+        return sisa if len(sisa) >= max(80, len(teks) // 2) else None
 
     # ---------- percakapan lanjutan (bagian 6) ----------
 
@@ -888,7 +1806,7 @@ class Percakapan:
                 f"({rupiah(p['budget_min'])}). Mau batas bawahnya dihapus? Bilang \"budget bebas\" terus minta lagi."]))
         uji = {**p, "budget_max": termurah - 1}
         kategori = k["kategori"]
-        ada = any(not self._cari(uji, kat, top_n=1).empty for kat in (kategori or [None]))
+        ada = any(not self._cari(uji, kat, top_n=1, merek=k["merek"]).empty for kat in (kategori or [None]))
         if not ada:
             label = self._label_kategori(kategori) if kategori else "produk"
             return self._respons(k, "kosong", "\n\n".join(catatan + [
@@ -1086,6 +2004,13 @@ class Percakapan:
     def _ulasan(self, a, k, pesan):
         """"ada review bagus soal produk ini ga?" -> kutipan ulasan ASLI dari
         index RAG (ChromaDB), disaring per produk. Bukan dijawab dari CBF."""
+        r = a["rujukan"] or {}
+        merek = self._cari_merek(a["teks"])[0]
+        if merek and not r.get("nomor") and not any(self._cari_nama(n)["status"] == "ketemu" for n in r.get("nama", [])):
+            return self._ulasan_merek(a, k, merek)  # yang ditanya brand-nya, bukan satu produk
+        if re.search(r"\b(positif|bagus|baik|puas)\w*", a["teks"]) and re.search(r"\b(negatif|jelek|buruk|keluhan|"
+                                                                                r"komplain)\w*", a["teks"]):
+            a = {**a, "preferensi_ulasan": None}  # "positif atau negatif?" = minta gambaran, bukan hanya keluhan
         ids, masalah = self._target_produk(a, k)
         if not ids:
             if not masalah:
@@ -1108,6 +2033,39 @@ class Percakapan:
             teks.append("_Kutipan diambil apa adanya dari ulasan pembeli di Shopee (ulasan soal pengiriman/penjual "
                         "nggak aku tampilkan)._")
         return self._respons(k, "ulasan", "\n\n".join(teks))
+
+    def _ulasan_merek(self, a, k, merek):
+        """"ulasan wardah kebanyakan positif atau negatif?" -> rangkuman semua produk brand itu yang punya ulasan:
+        persentase positif rata-rata tertimbang jumlah ulasan, produk yang paling dipuji (jadi kartu bernomor supaya
+        bisa lanjut "review nomor 1") dan yang persentase positifnya paling rendah. Dari data, bukan LLM."""
+        df = self.cbf.df[self.cbf.df["id"].isin(self._id_merek(merek))]
+        nama = self._nama_merek(merek)
+        ada = df[(df["jml_ulasan"].fillna(0) > 0) & df["skor_sentimen"].notna()]
+        if ada.empty:
+            return self._respons(k, "ulasan", f"Belum ada ulasan untuk produk {nama} di data aku, jadi aku belum bisa "
+                                               "bilang ulasannya kebanyakan positif atau negatif.")
+        n = int(ada["jml_ulasan"].sum())
+        positif = float((ada["skor_sentimen"] * ada["jml_ulasan"]).sum() / n)
+        vonis = ("Kebanyakan positif." if positif >= 0.6 else "Campuran." if positif >= 0.4
+                 else "Lebih banyak yang tidak positif.")
+        cukup = ada[ada["jml_ulasan"] >= 10]
+        cukup = cukup if len(cukup) >= 2 else ada  # persentase dari 1-2 ulasan saja mudah menyesatkan
+        teratas = cukup.sort_values(["skor_sentimen", "jml_ulasan"], ascending=[False, False]).head(TOP_N_DEFAULT)
+        k["pool"], k["alasan"], k["merek"] = list(teratas["id"]), {}, merek
+        produk, _ = self._susun_produk(teratas, k, a["teks"], otomatis=False)
+        rinci = lambda row: f"{float(row['skor_sentimen']) * 100:.0f}% positif dari {int(row['jml_ulasan'])} ulasan"
+        teks = [f"**{vonis}** Dari {n:,} ulasan untuk ".replace(",", ".") + f"{len(ada)} produk {nama} di data aku, "
+                f"sekitar **{positif * 100:.0f}%** positif (sisanya netral atau negatif).",
+                "Paling banyak dipuji: " + "; ".join(f"{self._label_banding(row['id'], k)} ({rinci(row)})"
+                                                     for _, row in teratas.iterrows()) + "."]
+        terbawah = cukup.sort_values(["skor_sentimen", "jml_ulasan"], ascending=[True, False]).iloc[0]
+        if terbawah["id"] not in set(teratas["id"]):
+            teks.append(f"Persentase positif paling rendah: {self._label_banding(terbawah['id'], k)} ({rinci(terbawah)}).")
+        if len(df) > len(ada):
+            teks.append(f"{len(df) - len(ada)} produk {nama} lain belum punya ulasan di data aku.")
+        teks.append("Mau lihat kutipan ulasannya? Bilang misalnya \"review nomor 1 dong\".")
+        teks.append("_Angka dari ulasan pembeli di Shopee yang sentimennya dilabeli otomatis._")
+        return self._respons(k, "ulasan", "\n\n".join(teks), produk)
 
     def _ringkas_ulasan(self, row, k, query, preferensi, maks):
         judul = f"**{self._label_banding(row['id'], k)}**"

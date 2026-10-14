@@ -74,7 +74,8 @@ button[kind="secondary"], button[kind="secondaryFormSubmit"] {
   border:1px solid transparent !important; border-radius:12px !important;
   height:auto !important; overflow:visible !important;
 }
-[class*="st-key-kartu"] [data-testid="stNumberInputContainer"]:focus-within { border-color:var(--black) !important; }
+/* garis fokus cukup di kotak input di dalamnya -- kalau wadah ini ikut bergaris, muncul garis ganda */
+[class*="st-key-kartu"] [data-testid="stNumberInputContainer"]:focus-within { border-color:transparent !important; }
 [class*="st-key-kartu"] [data-baseweb="select"] > div:focus-within,
 [class*="st-key-kartu"] [data-baseweb="input"]:focus-within { border-color:var(--black) !important; box-shadow:none !important; outline:none !important; }
 [class*="st-key-kartu"] input, [class*="st-key-kartu"] [data-baseweb="select"] div { color:var(--ink) !important; }
@@ -117,6 +118,12 @@ ul[data-testid="stSelectboxVirtualDropdown"] { background:var(--lavender-bg) !im
 ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"] { color:var(--ink) !important; }
 ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"]:hover,
 ul[data-testid="stSelectboxVirtualDropdown"] li[aria-selected="true"] { background:var(--lavender-soft) !important; }
+
+/* HP: Safari iPhone otomatis memperbesar halaman saat kotak isian berhuruf < 16px diketuk, dan halaman tetap
+   membesar sesudahnya (isi terpotong di kanan, bilah atas bergeser) -- semua kotak isian minimal 16px */
+@media (max-width: 768px) {
+  input, textarea, select { font-size:16px !important; }
+}
 """
 
 

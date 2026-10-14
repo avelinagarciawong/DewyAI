@@ -521,7 +521,12 @@ def tunggu_teks(d, teks, detik=40):
 def login_browser(d, url, email, password=PASSWORD):
     from selenium.webdriver.common.by import By
     d.get(f"{url}/?ke=login")
-    tunggu_teks(d, "Welcome back")
+    if not tunggu_teks(d, "Welcome back"):
+        # muatan pertama Streamlit kadang lambat saat suite penuh berjalan -> catat apa yang tampil, muat ulang sekali
+        d.save_screenshot(str(TMP / f"login_lambat_{uuid.uuid4().hex[:6]}.png"))
+        print("    [diagnosa] halaman login belum tampil:", d.find_element(By.TAG_NAME, "body").text[:200].replace("\n", " | "))
+        d.get(f"{url}/?ke=login")
+        tunggu_teks(d, "Welcome back", 60)
     kolom = d.find_elements(By.CSS_SELECTOR, ".st-key-auth_card input")
     kolom[0].send_keys(email)
     kolom[1].send_keys(password)

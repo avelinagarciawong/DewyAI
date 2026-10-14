@@ -23,11 +23,13 @@ SIDEBAR_CSS = f"""
   position:absolute; top:calc(2.725rem - 14px); right:0; visibility:visible !important; opacity:1 !important;
   display:block !important;
 }}
-/* ikon bawaan (panah ganda) diganti garis tiga */
+/* ikon bawaan (panah ganda) diganti garis tiga; wadahnya 24px sedangkan garisnya 18px, jadi ditengahkan
+   (margin auto) -- tanpa itu garis menempel di kiri dan jarak kiri-kanannya di dalam tombol tidak sama */
 [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"],
 [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
 [data-testid="stSidebarCollapsedControl"] [data-testid="stIconMaterial"] {{
   font-size:0 !important; color:transparent !important; display:inline-block; width:1.125rem; height:.75rem;
+  margin:0 auto !important;
   background:linear-gradient(var(--black), var(--black)) 0 0 / 100% 2px no-repeat,
              linear-gradient(var(--black), var(--black)) 0 50% / 100% 2px no-repeat,
              linear-gradient(var(--black), var(--black)) 0 100% / 100% 2px no-repeat;
@@ -233,6 +235,7 @@ def render():
         _nav_item(":material/grid_view:", "Dashboard", "admin_dashboard")
         _nav_item(":material/shield:", "User Management", "admin_users")
         _nav_item(":material/deployed_code:", "Product Management", "admin_produk")
+        _nav_item(":material/fact_check:", "Survey Results", "admin_survei")
 
     _recents()
 
